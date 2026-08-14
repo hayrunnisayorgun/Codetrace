@@ -1,4 +1,4 @@
-**# 🚀 Codetrace - AI Codebase \& Architecture Auditor**
+**#  Codetrace - AI Codebase \& Architecture Auditor**
 
 
 
