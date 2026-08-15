@@ -2,10 +2,9 @@ import requests
 from typing import Dict, Any
 from search_engine import search_code_chunks
 
-# Foundry Local sunucusunun şu anki canlı adresi:
+# Foundry Local sunucusunun canlı adresi
 FOUNDRY_LOCAL_URL = "http://127.0.0.1:50824/v1/chat/completions"
 DEFAULT_MODEL = "qwen2.5-coder-1.5b"
-
 
 def ask_codetrace(query: str, model_name: str = DEFAULT_MODEL, confidence_threshold: float = 10.0) -> Dict[str, Any]:
     """
@@ -63,7 +62,7 @@ def ask_codetrace(query: str, model_name: str = DEFAULT_MODEL, confidence_thresh
     }
 
     try:
-        response = requests.post(FOUNDRY_LOCAL_URL, json=payload, timeout=60)
+        response = requests.post(FOUNDRY_LOCAL_URL, json=payload, timeout=120)
         if response.status_code == 200:
             result = response.json()
             answer = result["choices"][0]["message"]["content"]
@@ -80,8 +79,7 @@ def ask_codetrace(query: str, model_name: str = DEFAULT_MODEL, confidence_thresh
 
 if __name__ == "__main__":
     # Test Sorusu
-    test_query = "How does the database connection work in this project?"
-
+    test_query = "How does HTTP session handling work in requests?"
     response = ask_codetrace(test_query)
     
     print("\n" + "="*50)
