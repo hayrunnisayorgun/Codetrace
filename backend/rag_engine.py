@@ -3,8 +3,9 @@ from typing import Dict, Any
 from search_engine import search_code_chunks
 
 # Foundry Local sunucusunun şu anki canlı adresi:
-FOUNDRY_LOCAL_URL = "http://127.0.0.1:28630/v1/chat/completions"
+FOUNDRY_LOCAL_URL = "http://127.0.0.1:50824/v1/chat/completions"
 DEFAULT_MODEL = "qwen2.5-coder-1.5b"
+
 
 def ask_codetrace(query: str, model_name: str = DEFAULT_MODEL, confidence_threshold: float = 10.0) -> Dict[str, Any]:
     """
