@@ -1,0 +1,21 @@
+# Virtual Environment
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# SQLite Database (Kişisel Veritabanı)
+*.db
+codetrace.db
+
+# Secrets & Environment Variables
+.env
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
