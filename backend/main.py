@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Any
 from pipeline import index_github_repository
 from rag_engine import ask_codetrace
+from diagram_generator import generate_architecture_diagram
 
 app = FastAPI(
     title="Codetrace AI API",
@@ -11,7 +12,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Frontend arayüzünün (UI) sorunsuz haberleşmesi için CORS izni
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,7 +20,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# İstek Şablonları (Pydantic Models)
 class AnalyzeRequest(BaseModel):
     repo_url: str
 
@@ -38,17 +37,19 @@ def read_root():
 @app.post("/api/analyze")
 def analyze_repository(request: AnalyzeRequest):
     """
-    Canlı GitHub reposunu sıfırdan indirir, AST ile parçalar ve SQLite'a indeksler.
+    Canlı GitHub reposunu sıfırdan indirir, AST ile parçalar, SQLite'a indeksler ve otomatik Mermaid diyagramı döner.
     """
     if not request.repo_url:
         raise HTTPException(status_code=400, detail="repo_url parametresi zorunludur.")
     
     try:
-        index_github_repository(request.repo_url)
+        result = index_github_repository(request.repo_url)
         return {
             "status": "success",
             "message": f"'{request.repo_url}' reposu başarıyla indekslendi.",
-            "repo_url": request.repo_url
+            "repo_url": request.repo_url,
+            "total_chunks": result.get("total_chunks", 0),
+            "mermaid_code": result.get("mermaid_code", "")
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"İndeksleme hatası: {str(e)}")
@@ -72,3 +73,14 @@ def ask_question(request: AskRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Sorgulama hatası: {str(e)}")
+
+@app.get("/api/diagram")
+def get_architecture_diagram():
+    """
+    İndekslenmiş repo için otomatik Mermaid.js mimari bağımlılık şemasını döner.
+    """
+    try:
+        result = generate_architecture_diagram()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Diyagram üretme hatası: {str(e)}")
