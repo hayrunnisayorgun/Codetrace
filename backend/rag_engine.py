@@ -2,8 +2,7 @@ import requests
 from typing import Dict, Any
 from search_engine import search_code_chunks
 
-# Foundry Local sunucusunun canlı adresi
-FOUNDRY_LOCAL_URL = "http://127.0.0.1:50824/v1/chat/completions"
+FOUNDRY_LOCAL_URL = "http://127.0.0.1:49454/v1/chat/completions"
 DEFAULT_MODEL = "qwen2.5-coder-1.5b"
 
 def ask_codetrace(query: str, model_name: str = DEFAULT_MODEL, confidence_threshold: float = 10.0) -> Dict[str, Any]:
@@ -13,19 +12,18 @@ def ask_codetrace(query: str, model_name: str = DEFAULT_MODEL, confidence_thresh
     2. Güven skorunu kontrol eder (Halüsinasyon engelleme).
     3. Mentörlük tonunda prompt hazırlar ve Foundry Local'a gönderir.
     """
-    print(f"\n🔍 '{query}' sorusu için kod tabanı taranıyor...")
+    print(f"\n[INFO] '{query}' sorusu için kod tabanı taranıyor...")
     relevant_chunks = search_code_chunks(query, top_k=3)
     
     if not relevant_chunks or relevant_chunks[0]["score"] < confidence_threshold:
         return {
-            "answer": "⚠️ I couldn't find enough relevant code in the repository to answer your question with confidence.",
+            "answer": "I couldn't find enough relevant code in the repository to answer your question with confidence.",
             "confidence_score": 0.0,
             "sources": []
         }
     
     top_score = relevant_chunks[0]["score"]
     
-    # 2. Context (Kod bağlamı) metnini oluşturma
     context_text = ""
     sources = []
     for c in relevant_chunks:
@@ -38,7 +36,6 @@ def ask_codetrace(query: str, model_name: str = DEFAULT_MODEL, confidence_thresh
         context_text += f"\n--- File: {c['file_path']} | Component: {c['name']} (Lines {c['start_line']}-{c['end_line']}) ---\n"
         context_text += f"{c['code_content']}\n"
 
-    # 3. Junior Mentorship System Prompt (Öğretici & Mentor Tonu)
     system_prompt = (
         "You are Codetrace AI, an expert software architecture mentor. "
         "Your goal is to answer the user's question accurately based ONLY on the provided code snippets. "
@@ -51,25 +48,34 @@ def ask_codetrace(query: str, model_name: str = DEFAULT_MODEL, confidence_thresh
 
     user_prompt = f"Code Context:\n{context_text}\n\nUser Question: {query}"
 
-    # 4. Foundry Local API Çağrısı
     payload = {
         "model": model_name,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.2
+        "temperature": 0.2,
+        "max_tokens": 600
     }
 
     try:
-        response = requests.post(FOUNDRY_LOCAL_URL, json=payload, timeout=120)
+        response = requests.post(FOUNDRY_LOCAL_URL, json=payload, timeout=180)
         if response.status_code == 200:
             result = response.json()
             answer = result["choices"][0]["message"]["content"]
+        elif "is not loaded" in response.text:
+            answer = (
+                f"Foundry Local model '{model_name}' is not currently loaded. "
+                f"Run `foundry model load {model_name}` and try again."
+            )
         else:
-            answer = f"❌ Error from Foundry Local daemon (Status Code: {response.status_code})\nDetails: {response.text}"
+            answer = f"Error from Foundry Local daemon (Status Code: {response.status_code})\nDetails: {response.text}"
+    except requests.exceptions.Timeout:
+        answer = "Foundry Local took too long to respond. The model may still be warming up — please try again."
+    except requests.exceptions.ConnectionError:
+        answer = "Could not connect to Foundry Local. Make sure the Foundry Local service is running on port 49454."
     except Exception as e:
-        answer = f"❌ Could not connect to Foundry Local daemon: {str(e)}"
+        answer = f"Could not connect to Foundry Local daemon: {str(e)}"
 
     return {
         "answer": answer,
@@ -78,13 +84,12 @@ def ask_codetrace(query: str, model_name: str = DEFAULT_MODEL, confidence_thresh
     }
 
 if __name__ == "__main__":
-    # Test Sorusu
     test_query = "How does HTTP session handling work in requests?"
     response = ask_codetrace(test_query)
     
     print("\n" + "="*50)
-    print(f"🛡️ CONFIDENCE SCORE: %{response['confidence_score']}")
-    print(f"📌 SOURCES: {response['sources']}")
+    print(f"CONFIDENCE SCORE: %{response['confidence_score']}")
+    print(f"SOURCES: {response['sources']}")
     print("="*50)
-    print(f"🤖 CODETRACE AI MENTOR ANSWER:\n\n{response['answer']}")
+    print(f"ANSWER:\n\n{response['answer']}")
     print("="*50)

@@ -1,36 +1,42 @@
-
 import requests
-import re
 from typing import Dict, Any
-from indexer import get_all_chunks
+from indexer import get_all_chunks, DB_PATH
 from rag_engine import FOUNDRY_LOCAL_URL, DEFAULT_MODEL
 
-def generate_repo_readme(model_name: str = DEFAULT_MODEL, db_path: str = "codetrace.db") -> Dict[str, Any]:
+
+def generate_repo_readme(model_name: str = DEFAULT_MODEL, db_path: str = DB_PATH) -> Dict[str, Any]:
     """
-    Veritabanındaki kod mimarisini inceleyerek repo için otomatik README.md dökümanı üretir.
+    Veritabanındaki GERÇEK indekslenmiş kod bileşenlerini kullanarak README üretir.
+    Foundry Local erişilebilirse LLM çıktısını kullanır; erişilemezse indeksteki
+    gerçek modüllerden otomatik Markdown README üretir.
     """
     chunks = get_all_chunks(db_path)
-    
+
     if not chunks:
         return {
             "status": "error",
-            "message": "README üretilecek veritabanı kaydı bulunamadı.",
+            "message": "Henüz indekslenmiş bir veritabanı kaydı bulunamadı. Lütfen önce yukarıdaki 'Restart' / 'Analyze' butonuna basarak repoyu indeksleyin.",
             "readme_markdown": ""
         }
 
-    unique_components = set()
-    for c in chunks[:10]:
-        unique_components.add(f"File: {c['file_path']} | Component: {c['name']} ({c['type']})")
-    
-    context_text = "\n".join(list(unique_components))
+    files_list = {c['file_path'] for c in chunks}
+
+    sample_components = []
+    for c in chunks[:15]:
+        sample_components.append(f"• **{c['name']}** ({c['type']}) — `{c['file_path']}`")
+
+    context_text = "\n".join(sample_components)
 
     system_prompt = (
         "You are Codetrace AI. Write a concise, professional GitHub README.md for this repository.\n"
-        "Use ONLY these exact sections:\n"
+        "Use ONLY these exact sections, nothing more:\n"
         "# Project Overview\n"
         "## Core Architecture & Modules\n"
         "## Key Capabilities\n"
-        "Rule: Only state facts from the analyzed components."
+        "STRICT RULES:\n"
+        "- Do NOT add Installation, Usage Examples, or Conclusion sections.\n"
+        "- Do NOT include any code, commands, or facts that are not explicitly present in the given components.\n"
+        "- Do NOT rely on prior/general knowledge about this library — treat it as if you have never seen it before."
     )
 
     user_prompt = f"Analyzed Repository Components:\n{context_text}"
@@ -50,8 +56,7 @@ def generate_repo_readme(model_name: str = DEFAULT_MODEL, db_path: str = "codetr
         if response.status_code == 200:
             result = response.json()
             readme_text = result["choices"][0]["message"]["content"]
-            
-            # Post-Processing: İstenmeyen uydurma bölümleri kod seviyesinde kırpma
+
             unwanted_sections = ["## Installation", "## Usage Examples", "## Conclusion"]
             for sec in unwanted_sections:
                 if sec in readme_text:
@@ -61,12 +66,28 @@ def generate_repo_readme(model_name: str = DEFAULT_MODEL, db_path: str = "codetr
                 "status": "success",
                 "readme_markdown": readme_text.strip()
             }
-        else:
-            return {"status": "error", "message": f"Status Code: {response.status_code} - {response.text}"}
     except Exception as e:
-        return {"status": "error", "message": f"Bağlantı Hatası: {str(e)}"}
+        print(f"[README Generator] Foundry Local LLM Offline/Timeout, generating structured DB README: {e}")
+
+    # Fallback: Robust Markdown generation directly from real DB chunks
+    fallback_readme = [
+        "# Codetrace Architecture Overview",
+        "",
+        "## Core Architecture & Modules",
+        "### Analyzed Key Modules & Components:",
+        context_text,
+        "",
+        "## Key Capabilities",
+        f"- **Indexed Total Files:** {len(files_list)} source files analyzed",
+        f"- **Indexed Total Chunks:** {len(chunks)} code components parsed via Python AST"
+    ]
+
+    return {
+        "status": "success",
+        "readme_markdown": "\n".join(fallback_readme)
+    }
+
 
 if __name__ == "__main__":
     result = generate_repo_readme()
-    print("\n--- GENERATED README.MD ---\n")
     print(result.get("readme_markdown", result))
