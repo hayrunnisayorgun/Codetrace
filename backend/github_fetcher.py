@@ -10,17 +10,16 @@ def fetch_repo_files(repo_url: str):
     parts = clean_url.split("/")
     
     if len(parts) < 2:
-        print("❌ Geçersiz GitHub URL formatı!")
+        print("[ERROR] Geçersiz GitHub URL formatı!")
         return []
 
     owner, repo = parts[0], parts[1]
     api_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1"
     
-    print(f"🔍 '{owner}/{repo}' reposu taranıyor...")
+    print(f"[INFO] '{owner}/{repo}' reposu taranıyor...")
     
     headers = {"User-Agent": "Codetrace-App"}
     
-    # Opsiyonel GitHub Token Kontrolü
     github_token = os.getenv("GITHUB_TOKEN")
     if github_token:
         headers["Authorization"] = f"Bearer {github_token}"
@@ -32,7 +31,7 @@ def fetch_repo_files(repo_url: str):
         response = requests.get(api_url, headers=headers)
 
     if response.status_code != 200:
-        print(f"❌ Hata: Repo çekilemedi (Status Code: {response.status_code})")
+        print(f"[ERROR] Hata: Repo çekilemedi (Status Code: {response.status_code})")
         return []
 
     data = response.json()
@@ -45,7 +44,21 @@ def fetch_repo_files(repo_url: str):
 
     return valid_files
 
+
+def fetch_repo_metadata(owner: str, repo: str) -> dict:
+    """GitHub'dan repo meta verisini (yıldız sayısı vb.) çeker."""
+    headers = {"User-Agent": "Codetrace-App"}
+    github_token = os.getenv("GITHUB_TOKEN")
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+    response = requests.get(f"https://api.github.com/repos/{owner}/{repo}", headers=headers)
+    if response.status_code == 200:
+        data = response.json()
+        return {"stars": data.get("stargazers_count", 0)}
+    return {"stars": 0}
+
+
 if __name__ == "__main__":
     test_repo = "https://github.com/psf/requests"
     files = fetch_repo_files(test_repo)
-    print(f"✅ Toplam {len(files)} dosya bulundu.")
+    print(f"[SUCCESS] Toplam {len(files)} dosya bulundu.")
