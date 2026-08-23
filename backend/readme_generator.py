@@ -1,7 +1,8 @@
 import requests
 from typing import Dict, Any
 from indexer import get_all_chunks, DB_PATH
-from rag_engine import FOUNDRY_LOCAL_URL, DEFAULT_MODEL
+from rag_engine import DEFAULT_MODEL
+from foundry_utils import get_chat_completions_url
 
 
 def generate_repo_readme(model_name: str = DEFAULT_MODEL, db_path: str = DB_PATH) -> Dict[str, Any]:
@@ -52,7 +53,7 @@ def generate_repo_readme(model_name: str = DEFAULT_MODEL, db_path: str = DB_PATH
     }
 
     try:
-        response = requests.post(FOUNDRY_LOCAL_URL, json=payload, timeout=180)
+        response = requests.post(get_chat_completions_url(), json=payload, timeout=180)
         if response.status_code == 200:
             result = response.json()
             readme_text = result["choices"][0]["message"]["content"]
