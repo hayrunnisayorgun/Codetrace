@@ -36,11 +36,21 @@ code, pre, .font-mono {
 }
 
 /* 🎨 Mermaid Interactive & Clickable Styles */
-.mermaid, .mermaid svg {
+/* Fullscreen diagram: shrink the SVG until it fits both axes.
+   The viewBox plus the default preserveAspectRatio keeps it centred and
+   undistorted, so the maximized view never scrolls. */
+.diagram-fit svg {
   width: 100% !important;
   height: 100% !important;
   max-width: 100% !important;
-  min-height: 360px !important;
+  max-height: 100% !important;
+  background: transparent !important;
+}
+
+.mermaid, .mermaid svg {
+  width: 100% !important;
+  height: auto !important;
+  max-width: 100% !important;
   background: transparent !important;
   background-color: transparent !important;
 }

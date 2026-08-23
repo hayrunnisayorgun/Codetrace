@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import mermaid from 'mermaid';
+import ReactMarkdown from 'react-markdown';
+import { Prism as CodeHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import {
   GitBranch, Search, Cpu, FileText, Code, ShieldCheck,
   Sparkles, RefreshCw, Send, Layers, Folder, FileCode,
@@ -17,7 +20,7 @@ mermaid.initialize({
     darkMode: true,
     background: 'transparent',
     fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-    fontSize: '13px',
+    fontSize: '11px',
     primaryColor: '#161c2e',
     primaryTextColor: '#e2e8f0',
     primaryBorderColor: '#38bdf8',
@@ -40,51 +43,145 @@ mermaid.initialize({
   securityLevel: 'loose',
 });
 
-// 🎨 VS Code Syntax Colorizer Component
-function SyntaxHighlighter({ code }) {
+// 🗺️ Builds the architecture diagram from the raw dependency graph.
+//
+// Collapsed layers render as a single box and every import crossing them is
+// merged into one labelled arrow -- that is what keeps the default view clean
+// instead of drawing all ~40 file-to-file arrows at once. Expanding a layer
+// swaps its box for the individual files, so detail is opt-in per layer.
+function buildMermaidFromGraph(graph, expandedNodes) {
+  if (!graph?.layers?.length) return '';
+
+  const layerOfFile = {};
+  const fileNodeId = {};
+  const layerNodeId = {};
+
+  graph.layers.forEach((layer, li) => {
+    layerNodeId[layer.name] = `L${li}`;
+    layer.files.forEach((file, fi) => {
+      layerOfFile[file] = layer.name;
+      fileNodeId[file] = `F${li}_${fi}`;
+    });
+  });
+
+  const lines = [
+    "%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 28, 'rankSpacing': 50, 'padding': 8, 'htmlLabels': true}}}%%",
+    'flowchart TB'
+  ];
+
+  graph.layers.forEach((layer) => {
+    const id = layerNodeId[layer.name];
+    if (expandedNodes[layer.name]) {
+      lines.push(`  subgraph ${id}_group["${layer.name}"]`);
+      lines.push('    direction LR');
+      layer.files.forEach((file) => {
+        lines.push(`    ${fileNodeId[file]}("📄 ${file.split('/').pop()}")`);
+      });
+      lines.push('  end');
+    } else {
+      const count = layer.files.length;
+      lines.push(`  ${id}("<b>${layer.name}</b><br/>${count} file${count === 1 ? '' : 's'}")`);
+    }
+  });
+
+  // Point every import at whichever node currently represents its endpoint and
+  // tally how many imports each pair of boxes stands for.
+  const pairCounts = new Map();
+  (graph.file_edges || []).forEach(({ source, target }) => {
+    const sourceLayer = layerOfFile[source];
+    const targetLayer = layerOfFile[target];
+    if (!sourceLayer || !targetLayer) return;
+
+    const from = expandedNodes[sourceLayer] ? fileNodeId[source] : layerNodeId[sourceLayer];
+    const to = expandedNodes[targetLayer] ? fileNodeId[target] : layerNodeId[targetLayer];
+    if (from === to) return;
+
+    const key = `${from}|${to}`;
+    pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+  });
+
+  // Drawing every dependency turns the chart into unreadable spaghetti, and the
+  // long tail of one-off imports is not what anyone reads a diagram for. Each
+  // box therefore keeps exactly one arrow -- its heaviest dependency -- labelled
+  // with how many imports that arrow stands for.
+  const strongestPerSource = new Map();
+  pairCounts.forEach((count, key) => {
+    const from = key.split('|')[0];
+    const current = strongestPerSource.get(from);
+    if (!current || count > current.count) {
+      strongestPerSource.set(from, { key, count });
+    }
+  });
+
+  strongestPerSource.forEach(({ key, count }) => {
+    const [from, to] = key.split('|');
+    lines.push(count > 1 ? `  ${from} -->|${count}| ${to}` : `  ${from} --> ${to}`);
+  });
+
+  lines.push('');
+  graph.layers.forEach((layer) => {
+    const { style } = layer;
+    if (!style) return;
+    const id = layerNodeId[layer.name];
+    const nodeIds = expandedNodes[layer.name]
+      ? layer.files.map((f) => fileNodeId[f])
+      : [id];
+
+    lines.push(
+      `  classDef ${style.class}_${id} fill:${style.fill},stroke:${style.stroke},stroke-width:1.5px,color:${style.text},rx:8,ry:8`
+    );
+    lines.push(`  class ${nodeIds.join(',')} ${style.class}_${id}`);
+    if (expandedNodes[layer.name]) {
+      // The group wrapper sits behind its file boxes, so it is tinted fainter
+      // still -- otherwise the two translucent layers stack into a solid block.
+      lines.push(
+        `  style ${id}_group fill:${style.stroke}12,stroke:${style.stroke}66,stroke-width:1px,color:${style.text}`
+      );
+    }
+  });
+
+  lines.push('  linkStyle default stroke:#64748b,stroke-width:1.5px');
+  return lines.join('\n');
+}
+
+// 🎨 File extension -> Prism language mapping for the Code Editor tab
+function languageFromFilePath(filePath) {
+  const ext = (filePath || '').split('.').pop().toLowerCase();
+  const map = { py: 'python', js: 'javascript', jsx: 'jsx', ts: 'typescript', tsx: 'tsx', json: 'json', md: 'markdown', css: 'css', html: 'html', sh: 'bash', yml: 'yaml', yaml: 'yaml' };
+  return map[ext] || 'python';
+}
+
+// 🎨 Shared code block renderer (chat markdown + Code Editor tab)
+function CodeBlock({ code, language = 'python' }) {
   if (!code) return null;
-  const lines = code.split('\n');
-
   return (
-    <div className="font-mono text-xs leading-relaxed">
-      {lines.map((line, lineIdx) => {
-        if (line.trim().startsWith('#')) {
-          return (
-            <div key={lineIdx} className="text-slate-500 italic font-medium">
-              {line}
-            </div>
-          );
+    <CodeHighlighter
+      language={language}
+      style={vscDarkPlus}
+      customStyle={{ background: 'transparent', fontSize: '12px', margin: 0, padding: 0 }}
+      wrapLongLines
+    >
+      {code}
+    </CodeHighlighter>
+  );
+}
+
+// 🎨 Markdown renderer with syntax-highlighted fenced code blocks (used for chat answers)
+function MarkdownWithCode({ content }) {
+  return (
+    <ReactMarkdown
+      components={{
+        code({ className, children, ...props }) {
+          const match = /language-(\w+)/.exec(className || '');
+          if (!match) {
+            return <code className="bg-[#0e121f] px-1 py-0.5 rounded text-sky-300 text-[11px]" {...props}>{children}</code>;
+          }
+          return <CodeBlock code={String(children).replace(/\n$/, '')} language={match[1]} />;
         }
-
-        const tokens = line.split(/(\s+|[(),:[\]{}="'])/);
-
-        return (
-          <div key={lineIdx} className="whitespace-pre">
-            {tokens.map((token, tIdx) => {
-              if (['from', 'import', 'def', 'class', 'return', 'if', 'else', 'elif', 'pass', 'super', 'self', 'raise', 'try', 'except', 'async', 'await'].includes(token)) {
-                return <span key={tIdx} className="text-purple-400 font-bold">{token}</span>;
-              }
-              if (['True', 'False', 'None', 'bool', 'int', 'str', 'float', 'List', 'Dict', 'Optional', 'Any', 'Union', 'Callable'].includes(token)) {
-                return <span key={tIdx} className="text-amber-400 font-semibold">{token}</span>;
-              }
-              if (token.startsWith('"') || token.startsWith("'") || token.endsWith('"') || token.endsWith("'")) {
-                return <span key={tIdx} className="text-emerald-400 font-medium">{token}</span>;
-              }
-              if (['FastAPI', 'APIRouter', 'Starlette', 'APIRoute', 'Route', 'Param', 'Path', 'Query', 'Body', 'HTTPException', 'RequestValidationError'].includes(token)) {
-                return <span key={tIdx} className="text-sky-300 font-bold">{token}</span>;
-              }
-              if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(token) && line.includes(`def ${token}`)) {
-                return <span key={tIdx} className="text-blue-400 font-bold">{token}</span>;
-              }
-              if (token.startsWith('@')) {
-                return <span key={tIdx} className="text-yellow-300 font-bold">{token}</span>;
-              }
-              return <span key={tIdx} className="text-slate-200">{token}</span>;
-            })}
-          </div>
-        );
-      })}
-    </div>
+      }}
+    >
+      {content}
+    </ReactMarkdown>
   );
 }
 
@@ -112,13 +209,19 @@ function App() {
     localStorage.setItem('codetrace_favorites', JSON.stringify(updated));
   };
 
-  // 🌳 Restored Expanded Nodes State for Interactive Diagram
-  const [expandedNodes, setExpandedNodes] = useState({
-    APIGateway: false,
-    CoreLogic: false,
-    DataSchema: false,
-    Database: false
-  });
+  // 🔔 Toast Notifications (replaces native alert())
+  const [toast, setToast] = useState(null); // { message, type: 'error' | 'success' }
+
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 4000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
+
+  // 🌳 Which architecture layers are expanded to show their individual files.
+  // Keyed by the layer names the backend returns for the analyzed repo.
+  const [expandedNodes, setExpandedNodes] = useState({});
   
   const [fileList, setFileList] = useState([]);
   const [fileSearch, setFileSearch] = useState('');
@@ -138,7 +241,7 @@ function App() {
   const [isMaximized, setIsMaximized] = useState(false);
 
   // 📝 Resizable Panel Width State (Percentage)
-  const [leftPanelWidth, setLeftPanelWidth] = useState(48);
+  const [leftPanelWidth, setLeftPanelWidth] = useState(36);
   const [isResizing, setIsResizing] = useState(false);
 
   // 📝 Multi-Tab Code Editor State
@@ -176,63 +279,76 @@ function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory, isAsking]);
 
-  // Dynamic Mermaid Graph Generator based on Expanded Nodes
+  // Dynamic Mermaid Graph Generator -- redrawn locally whenever a layer is
+  // expanded or collapsed, so toggling detail needs no server round-trip.
   useEffect(() => {
-    if (activeTab === 'diagram' && analyzeResult?.mermaid_code) {
-      let isMounted = true;
-      const renderSvg = async () => {
-        try {
-          const uniqueId = `mermaid-svg-${Date.now()}`;
-          const { svg } = await mermaid.render(uniqueId, analyzeResult.mermaid_code);
-          const cleanedSvg = svg
-            .replace(/width="[^"]*"/, 'width="100%"')
-            .replace(/height="[^"]*"/, '')
-            .replace(/style="[^"]*"/, 'style="width: 100%; height: 100%; min-height: 280px; background: transparent;"');
-          if (isMounted) setSvgContent(cleanedSvg);
-        } catch (err) {
-          console.error("Mermaid Render Error:", err);
-        }
-      };
-      renderSvg();
-      return () => { isMounted = false; };
-    }
-  }, [activeTab, analyzeResult]);
+    if (activeTab !== 'diagram') return;
+
+    const diagramCode = analyzeResult?.graph
+      ? buildMermaidFromGraph(analyzeResult.graph, expandedNodes)
+      : analyzeResult?.mermaid_code;
+
+    if (!diagramCode) return;
+
+    let isMounted = true;
+    const renderSvg = async () => {
+      try {
+        const uniqueId = `mermaid-svg-${Date.now()}`;
+        const { svg } = await mermaid.render(uniqueId, diagramCode);
+        const cleanedSvg = svg
+          .replace(/width="[^"]*"/, 'width="100%"')
+          .replace(/height="[^"]*"/, '')
+          .replace(/style="[^"]*"/, 'style="width: 100%; height: auto; background: transparent;"');
+        if (isMounted) setSvgContent(cleanedSvg);
+      } catch (err) {
+        console.error("Mermaid Render Error:", err);
+      }
+    };
+    renderSvg();
+    return () => { isMounted = false; };
+  }, [activeTab, analyzeResult, expandedNodes]);
 
   // Mermaid Diagram SVG Sizing Effect
+  //
+  // Mermaid'in ürettiği SVG bir viewBox taşıdığı için width:100% vermek onu
+  // panel genişliğine kadar BÜYÜTÜYOR: birkaç kutuluk sade bir diyagram
+  // arayüzde devasa görünüyordu. Doğal genişliğini üst sınır yapıyoruz, böylece
+  // dar panelde küçülüyor ama hiçbir zaman olduğundan büyük çizilmiyor.
   useEffect(() => {
-    if (svgContent && diagramContainerRef.current) {
-      const svgEl = diagramContainerRef.current.querySelector('svg');
-      if (svgEl) {
-        svgEl.setAttribute('width', '100%');
-        svgEl.removeAttribute('height');
-        svgEl.style.height = 'auto';
-        svgEl.style.maxWidth = '100%';
-        svgEl.style.display = 'block';
-      }
-    }
+    if (!svgContent || !diagramContainerRef.current) return;
+
+    const svgEl = diagramContainerRef.current.querySelector('svg');
+    if (!svgEl) return;
+
+    const viewBoxWidth = parseFloat((svgEl.getAttribute('viewBox') || '').split(/\s+/)[2]);
+
+    svgEl.setAttribute('width', '100%');
+    svgEl.removeAttribute('height');
+    svgEl.style.height = 'auto';
+    svgEl.style.minHeight = '';
+    svgEl.style.display = 'block';
+    svgEl.style.margin = '0 auto';
+    svgEl.style.maxWidth = Number.isFinite(viewBoxWidth) ? `${viewBoxWidth}px` : '100%';
   }, [svgContent]);
 
   const toggleNodeExpansion = (nodeKey) => {
     setExpandedNodes((prev) => ({ ...prev, [nodeKey]: !prev[nodeKey] }));
   };
 
-  // Bind direct click listeners to SVG diagram boxes
+  // Clicking a collapsed layer box in the SVG expands it into its files.
   useEffect(() => {
-    if (activeTab === 'diagram' && diagramContainerRef.current) {
-      const container = diagramContainerRef.current;
-      const nodes = container.querySelectorAll('.node');
-      
-      nodes.forEach((nodeEl) => {
-        nodeEl.onclick = () => {
-          const text = nodeEl.textContent || '';
-          if (text.includes('applications') || text.includes('main')) toggleNodeExpansion('APIGateway');
-          else if (text.includes('routing') || text.includes('APIRouter')) toggleNodeExpansion('CoreLogic');
-          else if (text.includes('params') || text.includes('Datastructures')) toggleNodeExpansion('DataSchema');
-          else if (text.includes('SQLite')) toggleNodeExpansion('Database');
-        };
-      });
-    }
-  }, [svgContent, activeTab]);
+    if (activeTab !== 'diagram' || !diagramContainerRef.current) return;
+
+    const layerNames = (analyzeResult?.graph?.layers || []).map((l) => l.name);
+    if (layerNames.length === 0) return;
+
+    diagramContainerRef.current.querySelectorAll('.node').forEach((nodeEl) => {
+      const label = nodeEl.textContent || '';
+      const matched = layerNames.find((name) => label.includes(name));
+      nodeEl.style.cursor = matched ? 'pointer' : 'default';
+      nodeEl.onclick = matched ? () => toggleNodeExpansion(matched) : null;
+    });
+  }, [svgContent, activeTab, analyzeResult]);
 
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -331,14 +447,17 @@ function App() {
           setRepoStars(data.stars >= 1000 ? `${(data.stars / 1000).toFixed(1)}k` : `${data.stars}`);
         }
         if (data.file_list && data.file_list.length > 0) setFileList(data.file_list);
-        if (data.readme_markdown) setReadmeMarkdown(data.readme_markdown);
+        setReadmeMarkdown('');
         setActiveTab('diagram');
+        // README'yi LLM ile yazmak ~2-3 dakika sürüyor; indekslemeyi bekletmemek
+        // için arka planda başlatıyoruz, hazır olunca sekmede kendiliğinden belirir.
+        handleGenerateReadme({ background: true });
       } else {
-        alert("Analysis Error: " + (data.detail || data.message));
+        setToast({ message: "Analysis Error: " + (data.detail || data.message), type: 'error' });
       }
     } catch (err) {
       console.error("Analyze request failed:", err);
-      alert("Backend server running on port 8000.");
+      setToast({ message: "Backend server running on port 8000.", type: 'error' });
     } finally {
       setIsAnalyzing(false);
     }
@@ -411,28 +530,65 @@ function App() {
     setAttachedImage(null);
     setIsAsking(true);
 
+    // Yanıtı akış halinde gösteriyoruz: model üretirken kelimeler anında ekrana
+    // düşsün diye önce boş bir AI mesajı ekleyip onu parça parça dolduruyoruz.
+    let aiMsgIndex = -1;
+    setChatHistory((prev) => {
+      aiMsgIndex = prev.length;
+      return [...prev, { sender: 'ai', answer: '', sources: [], streaming: true }];
+    });
+
+    const updateAiMsg = (patch) => {
+      setChatHistory((prev) => prev.map((msg, i) => (i === aiMsgIndex ? { ...msg, ...patch } : msg)));
+    };
+
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/ask', {
+      const response = await fetch('http://127.0.0.1:8000/api/ask-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: currentQuery })
       });
-      const data = await response.json();
-      
-      const aiMsg = {
-        sender: 'ai',
-        answer: data.answer,
-        confidence_score: data.confidence_score,
-        sources: data.sources || []
-      };
-      setChatHistory((prev) => [...prev, aiMsg]);
-      if (data.sources && data.sources.length > 0) {
-        setReferencedFiles(data.sources);
+
+      if (!response.ok || !response.body) throw new Error(`Stream failed: ${response.status}`);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let answer = '';
+
+      // Sunucu NDJSON gönderiyor; satır sınırları ağ paketlerine denk gelmediği
+      // için tamamlanmamış son satırı bir sonraki parçaya devrediyoruz.
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let event;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            continue;
+          }
+
+          if (event.type === 'meta') {
+            updateAiMsg({ confidence_score: event.confidence_score, sources: event.sources || [] });
+            if (event.sources?.length > 0) setReferencedFiles(event.sources);
+          } else if (event.type === 'text') {
+            answer += event.value;
+            updateAiMsg({ answer });
+          }
+        }
       }
+
+      updateAiMsg({ streaming: false });
     } catch (err) {
       console.error("Ask request failed:", err);
-      const errorMsg = { sender: 'ai', answer: "❌ Could not connect to server." };
-      setChatHistory((prev) => [...prev, errorMsg]);
+      updateAiMsg({ answer: "❌ Could not connect to server.", streaming: false });
     } finally {
       setIsAsking(false);
     }
@@ -460,7 +616,9 @@ function App() {
     if (file) setAttachedImage(file.name);
   };
 
-  const handleGenerateReadme = async () => {
+  // background=true: indeksleme biter bitmez sessizce çalışır -- kullanıcıyı
+  // README sekmesine zorlamaz ve hata durumunda toast göstermez.
+  const handleGenerateReadme = async ({ background = false } = {}) => {
     setIsGeneratingReadme(true);
     try {
       const response = await fetch('http://127.0.0.1:8000/api/generate-readme', {
@@ -470,13 +628,15 @@ function App() {
       const data = await response.json();
       if (response.ok && data.status === 'success') {
         setReadmeMarkdown(data.readme_markdown);
-        setActiveTab('readme');
-      } else {
-        alert(data.detail || data.message || "README üretilemedi.");
+        if (!background) setActiveTab('readme');
+      } else if (!background) {
+        setToast({ message: data.detail || data.message || "README üretilemedi.", type: 'error' });
       }
     } catch (err) {
       console.error("README generation failed:", err);
-      alert("Backend sunucusuna bağlanılamadı. Lütfen backend'in çalıştığından emin olun. (http://127.0.0.1:8000)");
+      if (!background) {
+        setToast({ message: "Backend sunucusuna bağlanılamadı. Lütfen backend'in çalıştığından emin olun. (http://127.0.0.1:8000)", type: 'error' });
+      }
     } finally {
       setIsGeneratingReadme(false);
     }
@@ -484,7 +644,16 @@ function App() {
 
   return (
     <div className="flex flex-col h-screen bg-[#090c15] text-slate-100 font-sans overflow-hidden antialiased select-none">
-      
+
+      {/* 🔔 Toast Notification */}
+      {toast && (
+        <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-lg shadow-lg text-sm font-medium animate-in fade-in slide-in-from-top-2 duration-300 ${
+          toast.type === 'error' ? 'bg-rose-600 text-white' : 'bg-emerald-600 text-white'
+        }`}>
+          {toast.message}
+        </div>
+      )}
+
       {/* 🚀 Top Bar Header */}
       <header className="h-14 bg-[#0e121f] border-b border-[#1c2438] px-5 flex items-center justify-between z-20 flex-shrink-0">
         <div className="flex items-center gap-4">
@@ -664,26 +833,25 @@ function App() {
                 })
             ) : (
               <div className="space-y-2 p-1 font-sans">
-                {[
-                  { name: 'APIGateway', label: 'applications.py / main.py', color: 'bg-sky-400' },
-                  { name: 'CoreLogic', label: 'routing.py / APIRouter', color: 'bg-indigo-400' },
-                  { name: 'DataSchema', label: 'params.py / Datastructures', color: 'bg-emerald-400' },
-                  { name: 'Database', label: 'SQLite Index Store', color: 'bg-amber-400' }
-                ].map((layer, i) => (
-                  <div 
+                {(analyzeResult?.graph?.layers || []).map((layer, i) => (
+                  <div
                     key={i}
                     onClick={() => toggleNodeExpansion(layer.name)}
                     className="bg-[#161c2e] border border-[#1c2438] hover:border-sky-500/40 p-2.5 rounded-xl cursor-pointer transition-all"
                   >
                     <div className="flex items-center justify-between text-xs font-bold text-white">
-                      <span className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full ${layer.color}`}></span>
-                        {layer.label}
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: layer.style?.stroke }}></span>
+                        <span className="truncate">{layer.name}</span>
+                        <span className="text-slate-500 font-semibold flex-shrink-0">({layer.files.length})</span>
                       </span>
-                      {expandedNodes[layer.name] ? <ChevronUp className="w-3.5 h-3.5 text-sky-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-500" />}
+                      {expandedNodes[layer.name] ? <ChevronUp className="w-3.5 h-3.5 text-sky-400 flex-shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />}
                     </div>
                   </div>
                 ))}
+                {!analyzeResult?.graph && (
+                  <div className="text-slate-500 text-xs p-3 text-center font-sans">Analyze a repository to see its layers.</div>
+                )}
               </div>
             )}
           </div>
@@ -735,9 +903,9 @@ function App() {
             </div>
 
             {chatHistory.map((msg, idx) => (
-              <div key={idx} className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
+              <div key={idx} className={`flex flex-col animate-in fade-in slide-in-from-bottom-2 duration-300 ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
                 {msg.sender === 'user' ? (
-                  <div className="bg-indigo-600 text-white px-3.5 py-2 rounded-xl max-w-[90%] font-bold text-xs shadow">
+                  <div className="bg-indigo-500/20 border border-indigo-400/40 text-indigo-100 px-3.5 py-2 rounded-xl max-w-[90%] font-bold text-xs shadow">
                     {msg.text}
                   </div>
                 ) : (
@@ -747,16 +915,18 @@ function App() {
                          Match Confidence: %{msg.confidence_score}
                       </span>
                     )}
-                    <p className="whitespace-pre-wrap leading-relaxed text-slate-100 text-xs font-sans font-semibold">{msg.answer}</p>
+                    <div className="prose prose-invert prose-sm max-w-none text-xs leading-relaxed prose-headings:text-white prose-strong:text-white prose-p:text-slate-100 prose-p:font-semibold prose-li:text-slate-100">
+                      <MarkdownWithCode content={msg.answer || ''} />
+                    </div>
+                    {msg.streaming && !msg.answer && (
+                      <span className="flex items-center gap-2 text-[11px] text-sky-400 font-semibold">
+                        <RefreshCw className="w-3 h-3 animate-spin" /> Reading the retrieved code...
+                      </span>
+                    )}
                   </div>
                 )}
               </div>
             ))}
-            {isAsking && (
-              <div className="flex items-center gap-2.5 text-xs text-sky-400 bg-[#161c2e] p-3 rounded-xl border border-[#1c2438]">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Analyzing architecture...
-              </div>
-            )}
             <div ref={chatEndRef} />
           </div>
 
@@ -900,24 +1070,26 @@ function App() {
                   <span>Click any node in diagram or sidebar to toggle expanding connections</span>
                 </span>
                 <button 
-                  onClick={() => setExpandedNodes({ APIGateway: false, CoreLogic: false, DataSchema: false, Database: false })}
+                  onClick={() => setExpandedNodes({})}
                   className="px-2 py-0.5 bg-[#111625] hover:bg-[#20283f] rounded border border-[#1c2438] text-[11px] font-bold"
                 >
                   Collapse All
                 </button>
               </div>
 
-              <div className="flex-1 flex gap-3 overflow-auto items-start relative min-h-[300px]">
-                {/* SVG Viewer (Baseline scale 0.8 so 100% fits screen) */}
-                <div 
-                  ref={diagramContainerRef}
-                  className="flex-1 flex justify-center items-start pt-2 px-2 bg-[#090c15] rounded-xl border border-[#1c2438] overflow-auto h-full shadow-inner cursor-pointer"
-                  style={{ transform: `scale(${zoomLevel * 0.8})`, transformOrigin: 'top center' }}
-                  dangerouslySetInnerHTML={{ __html: svgContent }}
-                />
+              <div className="flex-1 flex gap-3 overflow-hidden items-stretch relative min-h-[420px]">
+                {/* SVG Viewer -- frame stays fixed, only the diagram inside scales with zoom */}
+                <div className="flex-1 min-w-0 bg-[#090c15] rounded-xl border border-[#1c2438] overflow-auto shadow-inner cursor-pointer">
+                  <div
+                    ref={diagramContainerRef}
+                    className="w-full min-h-full flex justify-center items-center p-4"
+                    style={{ transform: `scale(${zoomLevel})`, transformOrigin: 'center center' }}
+                    dangerouslySetInnerHTML={{ __html: svgContent }}
+                  />
+                </div>
 
                 {/* RESTORED: Interactive Node Expander Sidebar on Right of Diagram */}
-                <div className="w-56 bg-[#161c2e] border border-[#1c2438] rounded-xl p-3 text-xs space-y-2 font-mono flex-shrink-0 shadow-lg overflow-y-auto max-h-full">
+                <div className="w-44 bg-[#161c2e] border border-[#1c2438] rounded-xl p-3 text-xs space-y-2 font-mono flex-shrink-0 shadow-lg overflow-y-auto max-h-full">
                   <span className="text-slate-200 font-bold uppercase tracking-wider text-[11px] block border-b border-[#1c2438] pb-1.5">Interactive Nodes</span>
                   
                   <div className="space-y-2">
@@ -953,8 +1125,9 @@ function App() {
                 </div>
               </div>
 
-              {/* Referenced Files at bottom of Diagram Panel */}
-              <div className="bg-[#161c2e] border border-[#1c2438] rounded-xl p-3 space-y-1.5 text-xs font-mono shadow flex-shrink-0">
+              {/* Referenced Files at bottom of Diagram Panel -- only shown once a question has sources */}
+              {referencedFiles.length > 0 && (
+              <div className="bg-[#161c2e] border border-[#1c2438] rounded-xl p-3 space-y-1.5 text-xs font-mono shadow flex-shrink-0 max-h-32 overflow-y-auto">
                 <span className="text-slate-200 font-bold tracking-wider uppercase block text-[11px]">Referenced Files</span>
                 <div className="flex flex-col space-y-1">
                   {referencedFiles.map((f, i) => (
@@ -974,6 +1147,7 @@ function App() {
                   ))}
                 </div>
               </div>
+              )}
 
             </div>
           )}
@@ -1012,15 +1186,16 @@ function App() {
                     </button>
                   </div>
 
-                  <div className="flex-1 overflow-auto p-4 font-mono text-xs leading-relaxed flex">
-                    <div className="pr-3 border-r border-[#1c2438] text-slate-600 select-none text-right font-mono font-bold min-w-[2rem]">
-                      {(fileContents[activeTabFile] || '').split('\n').map((_, i) => (
-                        <div key={i}>{i + 1}</div>
-                      ))}
-                    </div>
-                    <div className="pl-3 overflow-x-auto text-slate-100 font-mono font-semibold w-full">
-                      <SyntaxHighlighter code={fileContents[activeTabFile] || "Loading code..."} />
-                    </div>
+                  <div className="flex-1 overflow-auto p-4 font-mono text-xs leading-relaxed">
+                    <CodeHighlighter
+                      language={languageFromFilePath(activeTabFile)}
+                      style={vscDarkPlus}
+                      showLineNumbers
+                      customStyle={{ background: 'transparent', fontSize: '12px', margin: 0, padding: 0 }}
+                      lineNumberStyle={{ color: '#475569', minWidth: '2.5rem' }}
+                    >
+                      {fileContents[activeTabFile] || "Loading code..."}
+                    </CodeHighlighter>
                   </div>
                 </div>
               ) : (
@@ -1032,8 +1207,17 @@ function App() {
           )}
 
           {activeTab === 'readme' && (
-            <div className="flex-1 bg-[#090c15] p-5 rounded-xl border border-[#1c2438] text-xs font-mono leading-relaxed whitespace-pre-wrap text-slate-100 overflow-y-auto shadow-lg font-semibold">
-              {readmeMarkdown || "No README generated yet. Click 'Auto-README' in header."}
+            <div className="flex-1 bg-[#090c15] p-5 rounded-xl border border-[#1c2438] overflow-y-auto shadow-lg">
+              {!readmeMarkdown && isGeneratingReadme ? (
+                <div className="flex items-center gap-2.5 text-xs text-sky-400 font-semibold">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  Writing README from the indexed code... this takes a couple of minutes on a local model.
+                </div>
+              ) : (
+                <div className="prose prose-invert prose-sm max-w-none prose-headings:text-white prose-strong:text-white prose-code:text-sky-300 prose-a:text-sky-400">
+                  <ReactMarkdown>{readmeMarkdown || 'No README generated yet. Click "Auto-README" in header.'}</ReactMarkdown>
+                </div>
+              )}
             </div>
           )}
 
@@ -1135,9 +1319,10 @@ function App() {
               <X className="w-4 h-4" />
             </button>
           </div>
+          {/* diagram-fit scales the SVG down to fit the screen (see index.css),
+              so the fullscreen view never needs scrolling. */}
           <div
-            className="flex-1 overflow-auto flex justify-center items-start bg-[#111625] border border-[#1c2438] rounded-xl p-4"
-            style={{ transform: `scale(${zoomLevel})`, transformOrigin: 'top center' }}
+            className="diagram-fit flex-1 min-h-0 overflow-hidden flex justify-center items-center bg-[#111625] border border-[#1c2438] rounded-xl p-4"
             dangerouslySetInnerHTML={{ __html: svgContent }}
           />
         </div>
