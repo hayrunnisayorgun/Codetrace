@@ -1,10 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import sqlite3
 from pipeline import index_github_repository
-from rag_engine import ask_codetrace, DEFAULT_MODEL
-from diagram_generator import generate_architecture_diagram, get_diagram_node_details
+from rag_engine import ask_codetrace, ask_codetrace_stream, DEFAULT_MODEL
+from diagram_generator import generate_architecture_diagram, get_diagram_node_details, get_architecture_graph
 from readme_generator import generate_repo_readme
 from indexer import DB_PATH, get_file_content as get_indexed_file_content
 from auth import register_user, login_user
@@ -72,7 +73,7 @@ def analyze_repository(request: AnalyzeRequest):
             "total_chunks": result.get("total_chunks", 0),
             "file_list": result.get("file_list", []),
             "mermaid_code": result.get("mermaid_code", ""),
-            "readme_markdown": result.get("readme_markdown", ""),
+            "graph": get_architecture_graph(),
             "node_details": get_diagram_node_details()
         }
     except Exception as e:
@@ -94,6 +95,21 @@ def ask_question(request: AskRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Sorgulama hatası: {str(e)}")
+
+
+@app.post("/api/ask-stream")
+def ask_question_stream(request: AskRequest):
+    """
+    /api/ask ile aynı yanıtı üretir, ama modelin ürettiği kelimeleri anında
+    aktarır. İstemci ilk kelimeleri saniyeler içinde görür.
+    """
+    if not request.query:
+        raise HTTPException(status_code=400, detail="query parametresi zorunludur.")
+    return StreamingResponse(
+        ask_codetrace_stream(request.query),
+        media_type="application/x-ndjson",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
+    )
 
 
 @app.get("/api/diagram")
