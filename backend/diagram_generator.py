@@ -18,12 +18,15 @@ def categorize_file(file_path: str) -> str:
         return "Core Logic & Services"
 
 
-# Her katman için tutarlı bir renk paleti (frontend'deki sidebar renkleriyle eşleşir)
+# Her katman için tutarlı bir renk paleti (arayüzün vurgu renkleriyle eşleşir).
+# Dolgular 8 basamaklı hex ile yarı saydam: kutular arayüzün koyu zemininin
+# üzerinde yüzüyormuş gibi durur, blok halinde renk lekesi oluşturmaz.
+# (rgba() KULLANMAYIN -- içindeki virgüller Mermaid'in classDef ayrıştırıcısını bozar.)
 LAYER_STYLES = {
-    "Entry & API Layer":     {"class": "entryLayer", "fill": "#0c4a6e", "stroke": "#38bdf8", "text": "#e0f2fe"},
-    "Core Logic & Services": {"class": "coreLayer",  "fill": "#312e81", "stroke": "#818cf8", "text": "#e0e7ff"},
-    "Data Layer":            {"class": "dataLayer",  "fill": "#064e3b", "stroke": "#34d399", "text": "#d1fae5"},
-    "Utilities":             {"class": "utilLayer",  "fill": "#78350f", "stroke": "#fbbf24", "text": "#fef3c7"},
+    "Entry & API Layer":     {"class": "entryLayer", "fill": "#38bdf826", "stroke": "#38bdf8", "text": "#bae6fd"},
+    "Core Logic & Services": {"class": "coreLayer",  "fill": "#818cf826", "stroke": "#818cf8", "text": "#c7d2fe"},
+    "Data Layer":            {"class": "dataLayer",  "fill": "#34d39926", "stroke": "#34d399", "text": "#a7f3d0"},
+    "Utilities":             {"class": "utilLayer",  "fill": "#fbbf2426", "stroke": "#fbbf24", "text": "#fde68a"},
 }
 LAYER_ORDER = ["Entry & API Layer", "Core Logic & Services", "Data Layer", "Utilities"]
 
@@ -58,6 +61,53 @@ def extract_local_imports(raw_content: str, local_module_names: Set[str]) -> Set
                     if alias.name in local_module_names:
                         referenced.add(alias.name)
     return referenced
+
+
+def get_architecture_graph(db_path: str = DB_PATH) -> Dict[str, Any]:
+    """
+    Diyagramın ham verisini döner: katmanlar, içlerindeki dosyalar ve dosyalar
+    arasındaki GERÇEK import ilişkileri.
+
+    İstemci bu veriden diyagramı kendisi çiziyor; böylece bir katman açılıp
+    kapandığında sunucuya gitmeden anında yeniden çizilebiliyor ve kapalı
+    katmanlar tek bir kutuya toplanarak ok kalabalığı ortadan kalkıyor.
+    """
+    chunks = get_all_chunks(db_path)
+    if not chunks:
+        return {"layers": [], "file_edges": []}
+
+    files = sorted(set(c["file_path"] for c in chunks))
+    module_to_file = {f.split("/")[-1].replace(".py", ""): f for f in files}
+    local_module_names = set(module_to_file.keys()) - {"__init__"}
+
+    file_edges = []
+    for f in files:
+        raw_content = get_file_content(f, db_path)
+        if not raw_content:
+            continue
+        for imported_module in extract_local_imports(raw_content, local_module_names):
+            target_file = module_to_file[imported_module]
+            if target_file != f:
+                file_edges.append({"source": f, "target": target_file})
+
+    layers = defaultdict(list)
+    for f in files:
+        layers[categorize_file(f)].append(f)
+
+    ordered_names = [n for n in LAYER_ORDER if n in layers]
+    ordered_names += [n for n in layers if n not in LAYER_ORDER]
+
+    return {
+        "layers": [
+            {
+                "name": name,
+                "files": sorted(layers[name]),
+                "style": LAYER_STYLES.get(name, LAYER_STYLES["Core Logic & Services"])
+            }
+            for name in ordered_names
+        ],
+        "file_edges": file_edges
+    }
 
 
 def generate_architecture_diagram(db_path: str = DB_PATH, max_edges_per_node: int = 4) -> Dict[str, Any]:
