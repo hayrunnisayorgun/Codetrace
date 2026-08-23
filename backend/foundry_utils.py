@@ -1,6 +1,35 @@
 import subprocess
 import json
 
+DEFAULT_FOUNDRY_PORT = 43456
+
+
+def discover_foundry_endpoint() -> str:
+    """
+    'foundry status' çıktısından servisin GÜNCEL adresini okur.
+
+    Foundry Local her yeniden başladığında farklı bir port seçebiliyor, bu yüzden
+    sabit bir port'a güvenmek yerine her seferinde CLI'a soruyoruz. Servis kapalıysa
+    veya CLI yoksa varsayılan port'a düşer -- çağıran taraf zaten bağlantı hatasını
+    kullanıcıya anlamlı bir mesajla bildiriyor.
+    """
+    try:
+        result = subprocess.run(
+            ["foundry", "status", "--output", "json"],
+            capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace"
+        )
+        web_urls = json.loads(result.stdout).get("service", {}).get("webUrls", [])
+        if web_urls:
+            return web_urls[0].rstrip("/")
+    except Exception as e:
+        print(f"[Foundry Local] Servis adresi tespit edilemedi: {e}")
+    return f"http://127.0.0.1:{DEFAULT_FOUNDRY_PORT}"
+
+
+def get_chat_completions_url() -> str:
+    """Foundry Local'ın OpenAI uyumlu chat completions endpoint'ini döner."""
+    return f"{discover_foundry_endpoint()}/v1/chat/completions"
+
 
 def is_model_loaded(model_alias: str) -> bool:
     """
@@ -22,13 +51,46 @@ def is_model_loaded(model_alias: str) -> bool:
         return False
 
 
+def is_service_running() -> bool:
+    try:
+        result = subprocess.run(
+            ["foundry", "status", "--output", "json"],
+            capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace"
+        )
+        return json.loads(result.stdout).get("service", {}).get("ready", False)
+    except Exception:
+        return False
+
+
+def ensure_service_running():
+    """Foundry Local daemon'ı kapalıysa başlatır (düşük RAM'de kendiliğinden kapanabiliyor)."""
+    if is_service_running():
+        return
+    print("[Foundry Local] Servis çalışmıyor, başlatılıyor...")
+    try:
+        result = subprocess.run(
+            ["foundry", "server", "start"],
+            capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace"
+        )
+        if result.returncode == 0:
+            print("[Foundry Local] Servis başlatıldı.")
+        else:
+            print(f"[Foundry Local] Servis başlatılamadı: {result.stderr or result.stdout}")
+    except FileNotFoundError:
+        print("[Foundry Local] 'foundry' komutu bulunamadı. Foundry Local kurulu mu / PATH'te mi kontrol edin.")
+    except Exception as e:
+        print(f"[Foundry Local] Servis başlatılırken hata oluştu: {e}")
+
+
 def ensure_model_loaded(model_alias: str):
     """
-    Backend başlarken çağrılır: model zaten yüklüyse hiçbir şey yapmaz,
-    değilse 'foundry model load' ile belleğe yükler. Foundry Local kurulu
-    değilse veya servis kapalıysa hatayı loglar, backend'in ayağa kalkmasını
-    engellemez (README/sohbet endpoint'leri kendi fallback'lerini kullanır).
+    Backend başlarken çağrılır: servisi ve modeli hazır hale getirir. Model zaten
+    yüklüyse hiçbir şey yapmaz. Foundry Local kurulu değilse veya başlatılamıyorsa
+    hatayı loglar, backend'in ayağa kalkmasını engellemez (README/sohbet
+    endpoint'leri kendi fallback'lerini kullanır).
     """
+    ensure_service_running()
+
     if is_model_loaded(model_alias):
         print(f"[Foundry Local] '{model_alias}' zaten belleğe yüklü.")
         return
