@@ -1,11 +1,11 @@
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any
 from github_fetcher import fetch_repo_files, fetch_repo_metadata
 from ast_parser import parse_python_code
 from indexer import init_db, clear_db, save_chunks_to_db, save_file_content
 from rag_engine import ask_codetrace
 from diagram_generator import generate_architecture_diagram
-from readme_generator import generate_repo_readme
 
 def fetch_repo_stars(owner: str, repo: str) -> str:
     """
@@ -44,7 +44,11 @@ def fetch_raw_file_content(owner: str, repo: str, branch: str, file_path: str) -
 def index_github_repository(repo_url: str) -> Dict[str, Any]:
     """
     Canlı GitHub reposunu indirir, AST ile parçalara ayırır, SQLite'a kaydeder,
-    canlı yıldız sayısını çeker ve özel mimari diyagram ile README üretir.
+    canlı yıldız sayısını çeker ve mimari diyagramı üretir.
+
+    README'yi bilerek üretmez: LLM ile README yazmak tek başına ~160 saniye
+    sürüyordu ve kullanıcı diyagramı görene kadar bekliyordu. Artık istemci
+    indeksleme biter bitmez /api/generate-readme'yi ayrıca çağırıyor.
     """
     clean_url = repo_url.rstrip("/").replace("https://github.com/", "")
     parts = clean_url.split("/")
@@ -68,11 +72,22 @@ def index_github_repository(repo_url: str) -> Dict[str, Any]:
     total_chunks = []
     processed_files = []
 
-    for file_path in python_files[:15]:
+    selected_files = python_files[:15]
+
+    def _download(file_path: str):
         content = fetch_raw_file_content(owner, repo, "main", file_path)
         if not content:
             content = fetch_raw_file_content(owner, repo, "master", file_path)
+        return file_path, content
 
+    # Dosyaları paralel indiriyoruz: sıralı indirmede her dosya için ayrı bir
+    # ağ gidiş-dönüşü bekleniyordu ve tek başına ~12sn sürüyordu.
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        downloaded = dict(executor.map(_download, selected_files))
+
+    # Sonuçları repodaki sırayla işleyerek deterministik bir çıktı koruyoruz.
+    for file_path in selected_files:
+        content = downloaded.get(file_path)
         if content:
             save_file_content(file_path, content)
             chunks = parse_python_code(content, file_path)
@@ -82,7 +97,6 @@ def index_github_repository(repo_url: str) -> Dict[str, Any]:
     save_chunks_to_db(total_chunks)
 
     diagram_result = generate_architecture_diagram()
-    readme_result = generate_repo_readme()
 
     return {
         "status": "success",
@@ -91,6 +105,5 @@ def index_github_repository(repo_url: str) -> Dict[str, Any]:
         "total_chunks": len(total_chunks),
         "total_files": len(processed_files),
         "file_list": processed_files,
-        "mermaid_code": diagram_result.get("mermaid_code", ""),
-        "readme_markdown": readme_result.get("readme_markdown", "")
+        "mermaid_code": diagram_result.get("mermaid_code", "")
     }
