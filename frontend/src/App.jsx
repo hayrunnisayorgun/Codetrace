@@ -1,189 +1,22 @@
-import { useState, useEffect, useRef } from 'react';
-import mermaid from 'mermaid';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as CodeHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import {
   GitBranch, Search, Cpu, FileText, Code, ShieldCheck,
   Sparkles, RefreshCw, Send, Layers, Folder, FileCode,
-  Paperclip, CornerDownRight, MoreVertical, Clock,
-  Maximize2, RotateCcw, ZoomIn, ZoomOut, X, Mic, Image, Star,
+  CornerDownRight, Clock,
+  Maximize2, RotateCcw, ZoomIn, ZoomOut, X, Star,
   SlidersHorizontal, Plus,
   ChevronDown, User, Bookmark, BookmarkCheck,
   ChevronUp, Network
 } from 'lucide-react';
 
-mermaid.initialize({
-  startOnLoad: false,
-  theme: 'base',
-  themeVariables: {
-    darkMode: true,
-    background: 'transparent',
-    fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-    fontSize: '11px',
-    primaryColor: '#161c2e',
-    primaryTextColor: '#e2e8f0',
-    primaryBorderColor: '#38bdf8',
-    secondaryColor: '#1c2438',
-    tertiaryColor: '#111625',
-    lineColor: '#64748b',
-    clusterBkg: '#0e121f',
-    clusterBorder: '#1c2438',
-    edgeLabelBackground: '#111625',
-    nodeTextColor: '#e2e8f0',
-    mainBkg: '#161c2e',
-    titleColor: '#e2e8f0'
-  },
-  flowchart: {
-    curve: 'basis',
-    htmlLabels: true,
-    nodeSpacing: 35,
-    rankSpacing: 70
-  },
-  securityLevel: 'loose',
-});
+import { API_BASE, GUEST_USER } from './config';
+import mermaid, { buildMermaidFromGraph } from './lib/mermaid';
+import { languageFromFilePath } from './lib/language';
+import { MarkdownWithCode } from './components/CodeBlock';
 
-// 🗺️ Builds the architecture diagram from the raw dependency graph.
-//
-// Collapsed layers render as a single box and every import crossing them is
-// merged into one labelled arrow -- that is what keeps the default view clean
-// instead of drawing all ~40 file-to-file arrows at once. Expanding a layer
-// swaps its box for the individual files, so detail is opt-in per layer.
-function buildMermaidFromGraph(graph, expandedNodes) {
-  if (!graph?.layers?.length) return '';
-
-  const layerOfFile = {};
-  const fileNodeId = {};
-  const layerNodeId = {};
-
-  graph.layers.forEach((layer, li) => {
-    layerNodeId[layer.name] = `L${li}`;
-    layer.files.forEach((file, fi) => {
-      layerOfFile[file] = layer.name;
-      fileNodeId[file] = `F${li}_${fi}`;
-    });
-  });
-
-  const lines = [
-    "%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 28, 'rankSpacing': 50, 'padding': 8, 'htmlLabels': true}}}%%",
-    'flowchart TB'
-  ];
-
-  graph.layers.forEach((layer) => {
-    const id = layerNodeId[layer.name];
-    if (expandedNodes[layer.name]) {
-      lines.push(`  subgraph ${id}_group["${layer.name}"]`);
-      lines.push('    direction LR');
-      layer.files.forEach((file) => {
-        lines.push(`    ${fileNodeId[file]}("📄 ${file.split('/').pop()}")`);
-      });
-      lines.push('  end');
-    } else {
-      const count = layer.files.length;
-      lines.push(`  ${id}("<b>${layer.name}</b><br/>${count} file${count === 1 ? '' : 's'}")`);
-    }
-  });
-
-  // Point every import at whichever node currently represents its endpoint and
-  // tally how many imports each pair of boxes stands for.
-  const pairCounts = new Map();
-  (graph.file_edges || []).forEach(({ source, target }) => {
-    const sourceLayer = layerOfFile[source];
-    const targetLayer = layerOfFile[target];
-    if (!sourceLayer || !targetLayer) return;
-
-    const from = expandedNodes[sourceLayer] ? fileNodeId[source] : layerNodeId[sourceLayer];
-    const to = expandedNodes[targetLayer] ? fileNodeId[target] : layerNodeId[targetLayer];
-    if (from === to) return;
-
-    const key = `${from}|${to}`;
-    pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
-  });
-
-  // Drawing every dependency turns the chart into unreadable spaghetti, and the
-  // long tail of one-off imports is not what anyone reads a diagram for. Each
-  // box therefore keeps exactly one arrow -- its heaviest dependency -- labelled
-  // with how many imports that arrow stands for.
-  const strongestPerSource = new Map();
-  pairCounts.forEach((count, key) => {
-    const from = key.split('|')[0];
-    const current = strongestPerSource.get(from);
-    if (!current || count > current.count) {
-      strongestPerSource.set(from, { key, count });
-    }
-  });
-
-  strongestPerSource.forEach(({ key, count }) => {
-    const [from, to] = key.split('|');
-    lines.push(count > 1 ? `  ${from} -->|${count}| ${to}` : `  ${from} --> ${to}`);
-  });
-
-  lines.push('');
-  graph.layers.forEach((layer) => {
-    const { style } = layer;
-    if (!style) return;
-    const id = layerNodeId[layer.name];
-    const nodeIds = expandedNodes[layer.name]
-      ? layer.files.map((f) => fileNodeId[f])
-      : [id];
-
-    lines.push(
-      `  classDef ${style.class}_${id} fill:${style.fill},stroke:${style.stroke},stroke-width:1.5px,color:${style.text},rx:8,ry:8`
-    );
-    lines.push(`  class ${nodeIds.join(',')} ${style.class}_${id}`);
-    if (expandedNodes[layer.name]) {
-      // The group wrapper sits behind its file boxes, so it is tinted fainter
-      // still -- otherwise the two translucent layers stack into a solid block.
-      lines.push(
-        `  style ${id}_group fill:${style.stroke}12,stroke:${style.stroke}66,stroke-width:1px,color:${style.text}`
-      );
-    }
-  });
-
-  lines.push('  linkStyle default stroke:#64748b,stroke-width:1.5px');
-  return lines.join('\n');
-}
-
-// 🎨 File extension -> Prism language mapping for the Code Editor tab
-function languageFromFilePath(filePath) {
-  const ext = (filePath || '').split('.').pop().toLowerCase();
-  const map = { py: 'python', js: 'javascript', jsx: 'jsx', ts: 'typescript', tsx: 'tsx', json: 'json', md: 'markdown', css: 'css', html: 'html', sh: 'bash', yml: 'yaml', yaml: 'yaml' };
-  return map[ext] || 'python';
-}
-
-// 🎨 Shared code block renderer (chat markdown + Code Editor tab)
-function CodeBlock({ code, language = 'python' }) {
-  if (!code) return null;
-  return (
-    <CodeHighlighter
-      language={language}
-      style={vscDarkPlus}
-      customStyle={{ background: 'transparent', fontSize: '12px', margin: 0, padding: 0 }}
-      wrapLongLines
-    >
-      {code}
-    </CodeHighlighter>
-  );
-}
-
-// 🎨 Markdown renderer with syntax-highlighted fenced code blocks (used for chat answers)
-function MarkdownWithCode({ content }) {
-  return (
-    <ReactMarkdown
-      components={{
-        code({ className, children, ...props }) {
-          const match = /language-(\w+)/.exec(className || '');
-          if (!match) {
-            return <code className="bg-[#0e121f] px-1 py-0.5 rounded text-sky-300 text-[11px]" {...props}>{children}</code>;
-          }
-          return <CodeBlock code={String(children).replace(/\n$/, '')} language={match[1]} />;
-        }
-      }}
-    >
-      {content}
-    </ReactMarkdown>
-  );
-}
 
 function App() {
   const [repoUrl, setRepoUrl] = useState('');
@@ -236,7 +69,6 @@ function App() {
   const [isGeneratingReadme, setIsGeneratingReadme] = useState(false);
   const [svgContent, setSvgContent] = useState('');
 
-  // Ideal Diagram Scale Factor (0.8 scale factor = perfect 100% visual fit)
   const [zoomLevel, setZoomLevel] = useState(1.0);
   const [isMaximized, setIsMaximized] = useState(false);
 
@@ -253,27 +85,77 @@ function App() {
   // 🔍 Guardrails Modal
   const [showGuardrailsModal, setShowGuardrailsModal] = useState(false);
 
-  // 🎤 Interactive Input Controls
-  const [attachedFile, setAttachedFile] = useState(null);
-  const [attachedImage, setAttachedImage] = useState(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const fileInputRef = useRef(null);
-  const imageInputRef = useRef(null);
   const diagramContainerRef = useRef(null);
 
   // 🔐 Auth & User State
-  const [user, setUser] = useState(() => {
-    const saved = localStorage.getItem('codetrace_user');
-    return saved ? JSON.parse(saved) : { loggedIn: false, name: 'Guest User', email: '', avatar: '👤' };
-  });
-  const [showLoginModal, setShowLoginModal] = useState(false);
+  //
+  // The session token is the source of truth, not this cached user object: the
+  // backend re-validates the token on every protected call, so editing
+  // localStorage by hand buys nothing.
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem('codetrace_token') || '');
+  const [user, setUser] = useState(GUEST_USER);
+  // Nothing works without a session, so ask for one on arrival rather than
+  // letting the first click fail with an authorization error.
+  const [showLoginModal, setShowLoginModal] = useState(() => !localStorage.getItem('codetrace_token'));
   const [authMode, setAuthMode] = useState('login');
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
-  const [savedRepos, setSavedRepos] = useState(['https://github.com/fastapi/fastapi', 'https://github.com/psf/requests']);
+  const [savedRepos, setSavedRepos] = useState(() => {
+    const saved = localStorage.getItem('codetrace_saved_repos');
+    return saved ? JSON.parse(saved) : [];
+  });
   const [showProfileModal, setShowProfileModal] = useState(false);
 
   const chatEndRef = useRef(null);
+
+  const signOutLocally = useCallback(() => {
+    setAuthToken('');
+    setUser(GUEST_USER);
+    localStorage.removeItem('codetrace_token');
+  }, []);
+
+  // Every protected call goes through here so a session that expired or was
+  // revoked server-side drops the UI back to signed-out instead of leaving a
+  // stale "logged in" shell behind.
+  const authFetch = useCallback(async (path, options = {}) => {
+    const response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: { ...(options.headers || {}), Authorization: `Bearer ${authToken}` }
+    });
+    if (response.status === 401) {
+      signOutLocally();
+      setShowLoginModal(true);
+      throw new Error('unauthorized');
+    }
+    return response;
+  }, [authToken, signOutLocally]);
+
+  // Confirm a stored token is still valid before showing the user as signed in.
+  useEffect(() => {
+    // No token means signed out, and both the initial state and signOutLocally
+    // already leave `user` as GUEST_USER -- nothing to synchronise here.
+    if (!authToken) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/me`, {
+          headers: { Authorization: `Bearer ${authToken}` }
+        });
+        if (cancelled) return;
+        if (!response.ok) {
+          signOutLocally();
+          return;
+        }
+        const data = await response.json();
+        setUser({ loggedIn: true, name: data.user.name, email: data.user.email, avatar: '💻' });
+      } catch {
+        // Backend down: keep the token so a later reload can revalidate it.
+        if (!cancelled) setUser(GUEST_USER);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authToken, signOutLocally]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -310,10 +192,9 @@ function App() {
 
   // Mermaid Diagram SVG Sizing Effect
   //
-  // Mermaid'in ürettiği SVG bir viewBox taşıdığı için width:100% vermek onu
-  // panel genişliğine kadar BÜYÜTÜYOR: birkaç kutuluk sade bir diyagram
-  // arayüzde devasa görünüyordu. Doğal genişliğini üst sınır yapıyoruz, böylece
-  // dar panelde küçülüyor ama hiçbir zaman olduğundan büyük çizilmiyor.
+  // Mermaid emits a viewBox, so width:100% ENLARGES the drawing to fill the
+  // panel -- a three-box diagram ended up looking enormous. Capping the width
+  // at its natural size lets it shrink in a narrow panel but never blow up.
   useEffect(() => {
     if (!svgContent || !diagramContainerRef.current) return;
 
@@ -399,7 +280,7 @@ function App() {
 
     if (!fileContents[filePath]) {
       try {
-        const response = await fetch(`http://127.0.0.1:8000/api/file-content?path=${encodeURIComponent(filePath)}`);
+        const response = await authFetch(`/api/file-content?path=${encodeURIComponent(filePath)}`);
         const data = await response.json();
         if (data.content) {
           setFileContents((prev) => ({ ...prev, [filePath]: data.content }));
@@ -435,7 +316,7 @@ function App() {
     if (!repoUrl.trim()) return;
     setIsAnalyzing(true);
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/analyze', {
+      const response = await authFetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repo_url: repoUrl.trim() })
@@ -449,8 +330,8 @@ function App() {
         if (data.file_list && data.file_list.length > 0) setFileList(data.file_list);
         setReadmeMarkdown('');
         setActiveTab('diagram');
-        // README'yi LLM ile yazmak ~2-3 dakika sürüyor; indekslemeyi bekletmemek
-        // için arka planda başlatıyoruz, hazır olunca sekmede kendiliğinden belirir.
+        // Writing the README with the LLM takes 2-3 minutes, so it runs in the
+        // background and appears in its tab once ready.
         handleGenerateReadme({ background: true });
       } else {
         setToast({ message: "Analysis Error: " + (data.detail || data.message), type: 'error' });
@@ -464,11 +345,12 @@ function App() {
   };
 
   const handleToggleFavoriteRepo = () => {
-    if (savedRepos.includes(repoUrl)) {
-      setSavedRepos((prev) => prev.filter((r) => r !== repoUrl));
-    } else {
-      setSavedRepos((prev) => [...prev, repoUrl]);
-    }
+    if (!repoUrl.trim()) return;
+    const updated = savedRepos.includes(repoUrl)
+      ? savedRepos.filter((r) => r !== repoUrl)
+      : [...savedRepos, repoUrl];
+    setSavedRepos(updated);
+    localStorage.setItem('codetrace_saved_repos', JSON.stringify(updated));
   };
 
   const [authError, setAuthError] = useState('');
@@ -483,7 +365,7 @@ function App() {
       : { email: loginEmail, password: loginPassword };
 
     try {
-      const response = await fetch(`http://127.0.0.1:8000${endpoint}`, {
+      const response = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
@@ -491,47 +373,47 @@ function App() {
       const data = await response.json();
 
       if (!response.ok) {
-        setAuthError(data.detail || 'Bir hata oluştu.');
+        // FastAPI validation errors return `detail` as an array.
+        const detail = Array.isArray(data.detail) ? data.detail[0]?.msg : data.detail;
+        setAuthError(detail || 'Something went wrong.');
         return;
       }
 
-      const newUser = { loggedIn: true, name: data.user.name, email: data.user.email, avatar: '💻' };
-      setUser(newUser);
-      localStorage.setItem('codetrace_user', JSON.stringify(newUser));
+      localStorage.setItem('codetrace_token', data.token);
+      setAuthToken(data.token);
+      setUser({ loggedIn: true, name: data.user.name, email: data.user.email, avatar: '💻' });
       setShowLoginModal(false);
       setLoginEmail('');
       setLoginPassword('');
       setAuthName('');
     } catch (err) {
       console.error("Auth request failed:", err);
-      setAuthError('Sunucuya bağlanılamadı. Backend çalışıyor mu?');
+      setAuthError('Could not reach the server. Is the backend running?');
     }
   };
 
-  const handleLogout = () => {
-    setUser({ loggedIn: false, name: 'Guest User', email: '', avatar: '👤' });
-    localStorage.removeItem('codetrace_user');
+  const handleLogout = async () => {
+    // Revoke server-side too, otherwise the token stays valid until it expires.
+    try {
+      await authFetch('/api/logout', { method: 'POST' });
+    } catch (err) {
+      console.error("Logout request failed:", err);
+    }
+    signOutLocally();
     setShowProfileModal(false);
   };
 
   const handleAsk = async (e) => {
     if (e) e.preventDefault();
-    if (!query.trim() && !attachedFile && !attachedImage) return;
+    if (!query.trim()) return;
 
-    let fullQuery = query;
-    if (attachedFile) fullQuery += ` (Attached file: ${attachedFile})`;
-    if (attachedImage) fullQuery += ` (Attached image: ${attachedImage})`;
-
-    const userMsg = { sender: 'user', text: fullQuery };
-    setChatHistory((prev) => [...prev, userMsg]);
-    const currentQuery = fullQuery;
+    const currentQuery = query;
+    setChatHistory((prev) => [...prev, { sender: 'user', text: currentQuery }]);
     setQuery('');
-    setAttachedFile(null);
-    setAttachedImage(null);
     setIsAsking(true);
 
-    // Yanıtı akış halinde gösteriyoruz: model üretirken kelimeler anında ekrana
-    // düşsün diye önce boş bir AI mesajı ekleyip onu parça parça dolduruyoruz.
+    // Stream the answer in: an empty AI message is appended first, then filled
+    // piece by piece so words land on screen as the model produces them.
     let aiMsgIndex = -1;
     setChatHistory((prev) => {
       aiMsgIndex = prev.length;
@@ -543,7 +425,7 @@ function App() {
     };
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/ask-stream', {
+      const response = await authFetch('/api/ask-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: currentQuery })
@@ -556,8 +438,8 @@ function App() {
       let buffer = '';
       let answer = '';
 
-      // Sunucu NDJSON gönderiyor; satır sınırları ağ paketlerine denk gelmediği
-      // için tamamlanmamış son satırı bir sonraki parçaya devrediyoruz.
+      // The server sends NDJSON. Line boundaries do not align with network
+      // chunks, so any partial trailing line carries over to the next read.
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -594,34 +476,12 @@ function App() {
     }
   };
 
-  const handleVoiceRecordToggle = () => {
-    if (!isRecording) {
-      setIsRecording(true);
-      setTimeout(() => {
-        setQuery("Explain the routing architecture of this repository.");
-        setIsRecording(false);
-      }, 2500);
-    } else {
-      setIsRecording(false);
-    }
-  };
-
-  const handleFileUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (file) setAttachedFile(file.name);
-  };
-
-  const handleImageUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (file) setAttachedImage(file.name);
-  };
-
-  // background=true: indeksleme biter bitmez sessizce çalışır -- kullanıcıyı
-  // README sekmesine zorlamaz ve hata durumunda toast göstermez.
+  // background=true runs quietly right after indexing: it neither switches the
+  // user to the README tab nor raises a toast on failure.
   const handleGenerateReadme = async ({ background = false } = {}) => {
     setIsGeneratingReadme(true);
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/generate-readme', {
+      const response = await authFetch('/api/generate-readme', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
@@ -630,12 +490,12 @@ function App() {
         setReadmeMarkdown(data.readme_markdown);
         if (!background) setActiveTab('readme');
       } else if (!background) {
-        setToast({ message: data.detail || data.message || "README üretilemedi.", type: 'error' });
+        setToast({ message: data.detail || data.message || "Could not generate the README.", type: 'error' });
       }
     } catch (err) {
       console.error("README generation failed:", err);
       if (!background) {
-        setToast({ message: "Backend sunucusuna bağlanılamadı. Lütfen backend'in çalıştığından emin olun. (http://127.0.0.1:8000)", type: 'error' });
+        setToast({ message: "Could not reach the backend. Make sure it is running on http://127.0.0.1:8000", type: 'error' });
       }
     } finally {
       setIsGeneratingReadme(false);
@@ -869,7 +729,9 @@ function App() {
                 <Sparkles className="w-3.5 h-3.5" />
               </div>
               <div className="truncate min-w-0">
-                <h2 className="text-xs font-bold text-white tracking-wide truncate">Code Architect AI <span className="text-[10px] text-slate-500 font-normal">22m</span></h2>
+                <h2 className="text-xs font-bold text-white tracking-wide truncate">
+                  Code Architect AI <span className="text-[10px] text-slate-500 font-normal font-mono">qwen2.5-coder-1.5b</span>
+                </h2>
               </div>
             </div>
 
@@ -884,22 +746,31 @@ function App() {
           {/* Reasoning Stack */}
           <div className="flex-1 overflow-y-auto p-4 space-y-3.5 text-xs pb-24 font-sans font-semibold">
             
-            {/* Reasoning Nodes Card */}
+            {/* Index status -- reflects what has actually been indexed so far,
+                rather than narrating steps that are not really running. */}
             <div className="bg-[#161c2e] border border-[#1c2438] rounded-xl p-3.5 space-y-2">
               <div className="flex items-center justify-between text-slate-100 font-bold">
                 <div className="flex items-center gap-2 text-xs">
                   <div className="p-1 bg-indigo-500/20 text-indigo-400 rounded-full">
-                    <Clock className="w-3.5 h-3.5" />
+                    {isAnalyzing ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Clock className="w-3.5 h-3.5" />}
                   </div>
-                  Reasoning nodes
+                  Index status
                 </div>
-                <MoreVertical className="w-3.5 h-3.5 text-slate-500 cursor-pointer" />
               </div>
-              <ul className="space-y-1.5 pl-6 text-slate-300 font-semibold list-disc text-xs">
-                <li>Analyzing repository architecture...</li>
-                <li>Extracting AST classes, functions and type signatures...</li>
-                <li>Grounding RAG retrieval context...</li>
-              </ul>
+
+              {isAnalyzing ? (
+                <p className="pl-6 text-sky-400 text-xs font-semibold">Fetching and parsing repository files...</p>
+              ) : analyzeResult ? (
+                <ul className="space-y-1.5 pl-6 text-slate-300 font-semibold list-disc text-xs">
+                  <li>{analyzeResult.file_list?.length || 0} source files indexed</li>
+                  <li>{analyzeResult.total_chunks || 0} AST chunks (functions, classes, methods)</li>
+                  <li>{analyzeResult.graph?.layers?.length || 0} architecture layers detected</li>
+                </ul>
+              ) : (
+                <p className="pl-6 text-slate-400 text-xs font-semibold">
+                  No repository indexed yet. Paste a GitHub URL above and click Analyze.
+                </p>
+              )}
             </div>
 
             {chatHistory.map((msg, idx) => (
@@ -932,57 +803,7 @@ function App() {
 
           {/* Bottom Floating Input Box */}
           <div className="absolute bottom-3 left-3 right-3 bg-[#161c2e] border border-[#1c2438] rounded-xl p-2 shadow-2xl z-10 min-w-0 max-w-full">
-            {(attachedFile || attachedImage || isRecording) && (
-              <div className="mb-2 flex flex-wrap gap-1.5 text-[11px]">
-                {attachedFile && (
-                  <div className="px-2.5 py-0.5 bg-sky-500/10 border border-sky-500/30 rounded-lg flex items-center gap-1.5 text-sky-300 font-semibold truncate">
-                    <span className="truncate">📎 {attachedFile}</span>
-                    <X className="w-3 h-3 cursor-pointer hover:text-white" onClick={() => setAttachedFile(null)} />
-                  </div>
-                )}
-                {attachedImage && (
-                  <div className="px-2.5 py-0.5 bg-purple-500/10 border border-purple-500/30 rounded-lg flex items-center gap-1.5 text-purple-300 font-semibold truncate">
-                    <span className="truncate">🖼️ {attachedImage}</span>
-                    <X className="w-3 h-3 cursor-pointer hover:text-white" onClick={() => setAttachedImage(null)} />
-                  </div>
-                )}
-                {isRecording && (
-                  <div className="px-2.5 py-0.5 bg-rose-500/20 border border-rose-500/40 rounded-lg flex items-center gap-1.5 text-rose-300 font-bold animate-pulse">
-                    <span>🎙️ Recording...</span>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
-            <input type="file" ref={imageInputRef} accept="image/*" onChange={handleImageUpload} className="hidden" />
-
             <form onSubmit={handleAsk} className="flex items-center gap-1.5 min-w-0 w-full">
-              <button 
-                type="button" 
-                onClick={() => fileInputRef.current?.click()}
-                className="p-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/50 transition-all flex-shrink-0" 
-                title="Attach File"
-              >
-                <Paperclip className="w-3.5 h-3.5" />
-              </button>
-              <button 
-                type="button" 
-                onClick={handleVoiceRecordToggle}
-                className={`p-1 rounded-lg transition-colors flex-shrink-0 ${isRecording ? 'text-rose-400 bg-rose-500/20 animate-pulse' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'}`}
-                title="Voice Query"
-              >
-                <Mic className="w-3.5 h-3.5" />
-              </button>
-              <button 
-                type="button" 
-                onClick={() => imageInputRef.current?.click()}
-                className="p-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/50 transition-all flex-shrink-0"
-                title="Attach Snapshot"
-              >
-                <Image className="w-3.5 h-3.5" />
-              </button>
-
               <input
                 type="text"
                 value={query}
@@ -1009,7 +830,7 @@ function App() {
           title="Drag to resize panels"
         />
 
-        {/* 🎨 RESTORED RIGHT SIDE: Full Interactive Diagram & Code Editor Panel */}
+        {/* 🎨 Right panel: architecture diagram, code editor and generated README */}
         <div 
           style={{ width: `${100 - leftPanelWidth}%` }} 
           className="bg-[#111625] border border-[#1c2438] rounded-xl flex flex-col p-3 shadow-lg overflow-hidden relative"
@@ -1059,7 +880,7 @@ function App() {
             </div>
           </div>
 
-          {/* Main Diagram Area with Interactive Nodes Sidebar Restored */}
+          {/* Diagram canvas plus the layer list beside it */}
           {activeTab === 'diagram' && (
             <div className="flex-1 flex flex-col justify-between overflow-hidden gap-3">
               
@@ -1088,7 +909,7 @@ function App() {
                   />
                 </div>
 
-                {/* RESTORED: Interactive Node Expander Sidebar on Right of Diagram */}
+                {/* Layer list -- clicking a layer expands it in the diagram */}
                 <div className="w-44 bg-[#161c2e] border border-[#1c2438] rounded-xl p-3 text-xs space-y-2 font-mono flex-shrink-0 shadow-lg overflow-y-auto max-h-full">
                   <span className="text-slate-200 font-bold uppercase tracking-wider text-[11px] block border-b border-[#1c2438] pb-1.5">Interactive Nodes</span>
                   
@@ -1235,7 +1056,7 @@ function App() {
             </div>
             <form onSubmit={handleLoginSubmit} className="space-y-3">
               {authMode === 'register' && (
-                <input type="text" value={authName} onChange={(e) => setAuthName(e.target.value)} placeholder="Adınız" className="w-full bg-[#161c2e] border border-[#1c2438] rounded-lg px-3 py-2 text-xs text-white" />
+                <input type="text" value={authName} onChange={(e) => setAuthName(e.target.value)} placeholder="Your name" className="w-full bg-[#161c2e] border border-[#1c2438] rounded-lg px-3 py-2 text-xs text-white" />
               )}
               <input type="email" required value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} placeholder="architect@codetrace.ai" className="w-full bg-[#161c2e] border border-[#1c2438] rounded-lg px-3 py-2 text-xs text-white" />
               <input type="password" required value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} placeholder="••••••••••••" className="w-full bg-[#161c2e] border border-[#1c2438] rounded-lg px-3 py-2 text-xs text-white" />
@@ -1296,9 +1117,11 @@ function App() {
               <X className="w-4 h-4 text-slate-400 cursor-pointer" onClick={() => setShowGuardrailsModal(false)} />
             </div>
             <p className="text-xs text-slate-300 leading-relaxed font-semibold">
-              Codetrace AI yalnızca indekslenmiş, gerçek kod parçalarına dayanarak yanıt üretir.
-              Bir dosya veya bileşen için kayıt bulunamadığında uydurma (halüsinasyon) içerik üretmez,
-              bunun yerine dürüstçe "bulunamadı" yanıtı döner.
+              Codetrace AI answers only from code it has actually indexed. Before the
+              model is called, a question is checked against the indexed vocabulary:
+              if its distinctive terms never appear in the code, the question is
+              refused outright rather than answered from the model's own memory.
+              Every answer carries the file and line numbers it was drawn from.
             </p>
           </div>
         </div>
