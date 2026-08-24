@@ -5,11 +5,11 @@ from indexer import get_all_chunks, init_db, clear_db, save_chunks_to_db, DB_PAT
 from ast_parser import parse_python_code
 
 
-# Soru kalıbına ait, konu taşımayan kelimeler. Bunlar kod içinde nadiren geçtiği
-# için kapsama hesabında "bilinmeyen" sayılırsa gerçek sorular haksızca elenir
-# ("Explain the HTTPAdapter class" -> 'explain' kodda yok diye reddedilirdi).
-# Aynı şekilde numaratörde sayılırlarsa da ilgisiz soruları haksızca kurtarırlar,
-# bu yüzden hesabın tamamen dışında tutuluyorlar.
+# Question-shaped words that carry no topic. They rarely appear in code, so
+# counting them as "unknown" would reject genuine questions ("Explain the
+# HTTPAdapter class" failed purely because 'explain' is absent from the code).
+# Counting them as known would rescue unrelated ones just as unfairly, so they
+# are excluded from the calculation entirely.
 QUESTION_WORDS = frozenset({
     "explain", "describe", "tell", "show", "give", "list", "summarize", "walk",
     "what", "how", "why", "where", "which", "who", "when", "does", "did", "doing",
@@ -23,24 +23,22 @@ QUESTION_WORDS = frozenset({
 
 def compute_query_coverage(query: str, vectorizer: TfidfVectorizer) -> float:
     """
-    Sorudaki AYIRT EDİCİ kelimelerin ne kadarının kod tabanında gerçekten
-    geçtiğini 0..1 aralığında ölçer.
+    Score 0..1 for how much of a question's DISTINCTIVE vocabulary actually
+    occurs in the indexed code.
 
-    Neden gerekli: TF-IDF, sözlüğünde olmayan kelimeleri sessizce atar. Bu yüzden
-    kod tabanıyla hiç ilgisi olmayan bir soru ("How does this library handle
-    GraphQL subscriptions?") anlamı taşıyan kelimelerini ('graphql',
-    'subscriptions') kaybedip geriye kalan genel kelimeler ('library', 'handle')
-    üzerinden YÜKSEK benzerlik skoru alabiliyordu -- yani halüsinasyon engeli
-    tam da en çok gerektiği anda devre dışı kalıyordu.
+    Why this is needed: TF-IDF silently discards terms outside its vocabulary.
+    So "How does this library handle GraphQL subscriptions?" lost the two words
+    carrying its meaning ('graphql', 'subscriptions') and scored HIGH on the
+    generic remainder ('library', 'handle') -- the hallucination guard failed
+    exactly when it mattered most.
 
-    Kelimeleri IDF ağırlığıyla tartıyoruz: kod tabanında hiç geçmeyen bir kelime
-    mümkün olan en ayırt edici kelimedir, bu yüzden en yüksek ağırlığı alır ve
-    kapsama oranını sertçe düşürür.
+    Terms are weighted by IDF, and a term absent from the code is treated as
+    maximally distinctive, so it drives the score down hard.
     """
     terms = [t for t in vectorizer.build_analyzer()(query) if t not in QUESTION_WORDS]
     if not terms:
-        # Soruda hiç konu kelimesi yok ("how does this work?"); kontrol edecek bir
-        # şey kalmadığından kararı benzerlik skoruna bırakıyoruz.
+        # No topical words at all ("how does this work?"); nothing to verify,
+        # so leave the decision to the similarity score.
         return 1.0
 
     vocabulary = vectorizer.vocabulary_
@@ -62,13 +60,13 @@ def compute_query_coverage(query: str, vectorizer: TfidfVectorizer) -> float:
 
 def search_code_chunks_with_coverage(query: str, top_k: int = 3, db_path: str = DB_PATH) -> Tuple[List[Dict[str, Any]], float]:
     """
-    En benzer top_k kod parçasını ve sorunun kod tabanı sözlüğüyle kapsama
-    oranını birlikte döner.
+    Return the top_k most similar chunks together with the question's
+    vocabulary coverage.
     """
     chunks = get_all_chunks(db_path)
 
     if not chunks:
-        print("[WARNING] Veritabanında aranacak kayıt bulunamadı.")
+        print("[WARNING] Nothing indexed to search.")
         return [], 0.0
 
     corpus = [f"{c['name']} {c['code_content']}" for c in chunks]
@@ -93,7 +91,7 @@ def search_code_chunks_with_coverage(query: str, top_k: int = 3, db_path: str = 
 
 def search_code_chunks(query: str, top_k: int = 3, db_path: str = DB_PATH) -> List[Dict[str, Any]]:
     """
-    Kullanıcının sorusuna en benzeyen top_k adet kod parçasını TF-IDF ve Kosinüs Benzerliği ile bulur.
+    Find the top_k chunks most similar to the question via TF-IDF cosine similarity.
     """
     results, _ = search_code_chunks_with_coverage(query, top_k, db_path)
     return results
@@ -118,11 +116,11 @@ class AuthSystem:
     save_chunks_to_db(chunks)
 
     query = "database connection open"
-    print(f"\n[INFO] Sorulan Soru: '{query}'")
+    print(f"\n[INFO] Question: '{query}'")
 
     results = search_code_chunks(query, top_k=2)
 
-    print("\n[RESULTS] ARAMA SONUÇLARI (En Alakalı Parçalar):")
+    print("\n[RESULTS] Most relevant chunks:")
     for r in results:
-        print(f"\n[SCORE] Güven Skoru: %{r['score']} | [{r['type'].upper()}] {r['name']} ({r['file_path']}: Satır {r['start_line']}-{r['end_line']})")
+        print(f"\n[SCORE] {r['score']}% | [{r['type'].upper()}] {r['name']} ({r['file_path']}: lines {r['start_line']}-{r['end_line']})")
         print(f"```{r['code_content']}```")

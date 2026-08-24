@@ -7,16 +7,17 @@ from foundry_utils import get_chat_completions_url
 
 def generate_repo_readme(model_name: str = DEFAULT_MODEL, db_path: str = DB_PATH) -> Dict[str, Any]:
     """
-    Veritabanındaki GERÇEK indekslenmiş kod bileşenlerini kullanarak README üretir.
-    Foundry Local erişilebilirse LLM çıktısını kullanır; erişilemezse indeksteki
-    gerçek modüllerden otomatik Markdown README üretir.
+    Write a README from the components actually present in the index.
+
+    Uses the LLM when Foundry Local is reachable; otherwise falls back to a
+    Markdown summary built directly from the indexed modules.
     """
     chunks = get_all_chunks(db_path)
 
     if not chunks:
         return {
             "status": "error",
-            "message": "Henüz indekslenmiş bir veritabanı kaydı bulunamadı. Lütfen önce yukarıdaki 'Restart' / 'Analyze' butonuna basarak repoyu indeksleyin.",
+            "message": "Nothing has been indexed yet. Analyze a repository first.",
             "readme_markdown": ""
         }
 
@@ -70,7 +71,7 @@ def generate_repo_readme(model_name: str = DEFAULT_MODEL, db_path: str = DB_PATH
     except Exception as e:
         print(f"[README Generator] Foundry Local LLM Offline/Timeout, generating structured DB README: {e}")
 
-    # Fallback: Robust Markdown generation directly from real DB chunks
+    # Fallback: build the README straight from the indexed chunks.
     fallback_readme = [
         "# Codetrace Architecture Overview",
         "",

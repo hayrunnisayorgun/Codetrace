@@ -5,10 +5,10 @@ from search_engine import search_code_chunks_with_coverage
 from foundry_utils import get_chat_completions_url
 DEFAULT_MODEL = "qwen2.5-coder-1.5b"
 
-# Sorunun ayırt edici kelimelerinin en az bu kadarı kod tabanında geçmeli.
-# Bunun altındaki sorular kod tabanıyla ilgisizdir; benzerlik skoru yüksek çıksa
-# bile (skor, sözlükte olmayan kelimeler atıldığı için yanıltıcı olabiliyor)
-# yanıt üretmeyi reddediyoruz.
+# At least this share of a question's distinctive terms must appear in the
+# codebase. Below it the question is off-topic, and we refuse to answer even
+# when the similarity score looks high -- that score is unreliable here,
+# because terms missing from the vocabulary are dropped before scoring.
 MIN_QUERY_COVERAGE = 0.62
 
 NO_MATCH_ANSWER = "I couldn't find enough relevant code in the repository to answer your question with confidence."
@@ -30,22 +30,22 @@ SYSTEM_PROMPT = (
 
 def _retrieve_context(query: str, confidence_threshold: float):
     """
-    Soruyla ilgili kod parçalarını arar ve LLM'e gönderilecek bağlamı hazırlar.
+    Retrieve the code chunks for a question and assemble the LLM context.
 
-    İki ayrı halüsinasyon engeli var ve ikisi de gerekli:
-      - benzerlik skoru: eldeki en iyi parça yeterince benziyor mu?
-      - kapsama oranı  : sorunun ayırt edici kelimeleri kod tabanında var mı?
-    Tek başına skora güvenmek yetmiyor; kod tabanıyla ilgisiz bir soru,
-    anlamlı kelimeleri TF-IDF sözlüğünde bulunmadığı için elenince geriye kalan
-    genel kelimeler üzerinden yüksek skor alabiliyor.
+    Two independent hallucination gates, both necessary:
+      - similarity score: is the best chunk close enough to the question?
+      - coverage:         do the question's distinctive terms exist in the code?
+    The score alone is not enough. An unrelated question can still score high,
+    because the terms that carry its meaning are absent from the TF-IDF
+    vocabulary and get dropped, leaving only generic words to match on.
 
-    Yanıt üretilmemesi gerekiyorsa nedenini belirten bir dize döner.
+    Returns a reason string when no answer should be generated.
     """
-    print(f"\n[INFO] '{query}' sorusu için kod tabanı taranıyor...")
+    print(f"\n[INFO] Searching the index for: '{query}'")
     relevant_chunks, coverage = search_code_chunks_with_coverage(query, top_k=3)
 
     if coverage < MIN_QUERY_COVERAGE:
-        print(f"[GUARDRAIL] Soru kod tabanının dışında (kapsama={coverage:.2f}), yanıt üretilmiyor.")
+        print(f"[GUARDRAIL] Off-topic question (coverage={coverage:.2f}); refusing to answer.")
         return "off_topic"
 
     if not relevant_chunks or relevant_chunks[0]["score"] < confidence_threshold:
@@ -85,10 +85,10 @@ def _build_payload(user_prompt: str, model_name: str, stream: bool = False) -> D
 
 def ask_codetrace(query: str, model_name: str = DEFAULT_MODEL, confidence_threshold: float = 10.0) -> Dict[str, Any]:
     """
-    RAG Akışı (tek seferde yanıt):
-    1. İlgili kod parçalarını arar.
-    2. Güven skorunu kontrol eder (Halüsinasyon engelleme).
-    3. Mentörlük tonunda prompt hazırlar ve Foundry Local'a gönderir.
+    RAG flow, returned in one piece:
+    1. Retrieve the relevant code chunks.
+    2. Apply the hallucination gates.
+    3. Build the mentor-style prompt and send it to Foundry Local.
     """
     context = _retrieve_context(query, confidence_threshold)
     if isinstance(context, str):
@@ -127,14 +127,14 @@ def ask_codetrace(query: str, model_name: str = DEFAULT_MODEL, confidence_thresh
 
 def ask_codetrace_stream(query: str, model_name: str = DEFAULT_MODEL, confidence_threshold: float = 10.0) -> Iterator[str]:
     """
-    ask_codetrace ile aynı RAG akışı, ama yanıtı üretildiği anda parça parça
-    gönderir. Böylece kullanıcı 60-90 saniye boş ekrana bakmak yerine ilk
-    kelimeleri saniyeler içinde görür.
+    Same RAG flow as ask_codetrace, but emitted as the model produces it, so
+    the reader sees the first words in seconds instead of staring at a blank
+    panel for 60-90 seconds.
 
-    NDJSON (her satır bir JSON) formatında akış üretir:
-      {"type": "meta",  "confidence_score": .., "sources": [..]}   -- ilk satır
-      {"type": "text",  "value": ".."}                             -- 0..n adet
-      {"type": "done"}                                             -- son satır
+    Streams NDJSON, one JSON object per line:
+      {"type": "meta",  "confidence_score": .., "sources": [..]}   -- first line
+      {"type": "text",  "value": ".."}                             -- 0..n of these
+      {"type": "done"}                                             -- final line
     """
     context = _retrieve_context(query, confidence_threshold)
 
