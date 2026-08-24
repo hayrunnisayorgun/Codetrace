@@ -1,31 +1,15 @@
 import requests
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Any
+from typing import Dict, Any
 from github_fetcher import fetch_repo_files, fetch_repo_metadata
 from ast_parser import parse_python_code
 from indexer import init_db, clear_db, save_chunks_to_db, save_file_content
-from rag_engine import ask_codetrace
 from diagram_generator import generate_architecture_diagram
 
-def fetch_repo_stars(owner: str, repo: str) -> str:
-    """
-    GitHub REST API üzerinden reponun canlı yıldız sayısını çeker.
-    """
-    try:
-        url = f"https://api.github.com/repos/{owner}/{repo}"
-        res = requests.get(url, headers={"User-Agent": "CodetraceAI"}, timeout=5)
-        if res.status_code == 200:
-            stars = res.json().get("stargazers_count", 0)
-            if stars >= 1000:
-                return f"{round(stars/1000, 1)}k Stars"
-            return f"{stars} Stars"
-    except Exception:
-        pass
-    return "32.1k Stars"
 
 def is_relevant_file(file_path: str) -> bool:
     """
-    Test, dokümantasyon ve örnek dosyaları filtreler, ana kaynak kodlarına odaklanır.
+    Skip tests, docs and examples so indexing focuses on the actual source.
     """
     path_lower = file_path.lower()
     ignore_patterns = ["docs_src/", "docs/", "tests/", "test/", "examples/", "benchmarks/", "setup.py", "__version__.py", "conf.py"]
@@ -33,7 +17,7 @@ def is_relevant_file(file_path: str) -> bool:
 
 def fetch_raw_file_content(owner: str, repo: str, branch: str, file_path: str) -> str:
     """
-    GitHub raw API üzerinden ilgili dosyanın içeriğini çeker.
+    Fetch a single file's contents through the GitHub raw endpoint.
     """
     raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}"
     response = requests.get(raw_url)
@@ -43,17 +27,17 @@ def fetch_raw_file_content(owner: str, repo: str, branch: str, file_path: str) -
 
 def index_github_repository(repo_url: str) -> Dict[str, Any]:
     """
-    Canlı GitHub reposunu indirir, AST ile parçalara ayırır, SQLite'a kaydeder,
-    canlı yıldız sayısını çeker ve mimari diyagramı üretir.
+    Fetch a live GitHub repository, split it into AST chunks, store them in
+    SQLite, read the star count, and build the architecture diagram.
 
-    README'yi bilerek üretmez: LLM ile README yazmak tek başına ~160 saniye
-    sürüyordu ve kullanıcı diyagramı görene kadar bekliyordu. Artık istemci
-    indeksleme biter bitmez /api/generate-readme'yi ayrıca çağırıyor.
+    The README is deliberately not generated here: writing it with the LLM took
+    ~160s on its own, all of it before the user could see the diagram. The
+    client calls /api/generate-readme separately once indexing returns.
     """
     clean_url = repo_url.rstrip("/").replace("https://github.com/", "")
     parts = clean_url.split("/")
     if len(parts) < 2:
-        return {"status": "error", "message": "Geçersiz GitHub URL formatı"}
+        return {"status": "error", "message": "Invalid GitHub URL format"}
 
     owner, repo = parts[0], parts[1]
     repo_name = f"{owner}/{repo}"
@@ -80,12 +64,12 @@ def index_github_repository(repo_url: str) -> Dict[str, Any]:
             content = fetch_raw_file_content(owner, repo, "master", file_path)
         return file_path, content
 
-    # Dosyaları paralel indiriyoruz: sıralı indirmede her dosya için ayrı bir
-    # ağ gidiş-dönüşü bekleniyordu ve tek başına ~12sn sürüyordu.
+    # Downloaded in parallel: fetching them one at a time meant a separate
+    # round trip per file and cost ~12s by itself.
     with ThreadPoolExecutor(max_workers=8) as executor:
         downloaded = dict(executor.map(_download, selected_files))
 
-    # Sonuçları repodaki sırayla işleyerek deterministik bir çıktı koruyoruz.
+    # Processed in repository order so the output stays deterministic.
     for file_path in selected_files:
         content = downloaded.get(file_path)
         if content:
