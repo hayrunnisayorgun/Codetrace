@@ -3,20 +3,20 @@ import requests
 
 def fetch_repo_files(repo_url: str):
     """
-    GitHub REST API kullanarak repodaki Python kodlarını ve Markdown dokümanlarını çeker.
-    .env içinde GITHUB_TOKEN varsa limiti 60'tan 5000'e çıkarır.
+    List the repository's Python and Markdown files via the GitHub REST API.
+    A GITHUB_TOKEN in .env raises the hourly rate limit from 60 to 5000.
     """
     clean_url = repo_url.rstrip("/").replace("https://github.com/", "")
     parts = clean_url.split("/")
     
     if len(parts) < 2:
-        print("[ERROR] Geçersiz GitHub URL formatı!")
+        print("[ERROR] Invalid GitHub URL format.")
         return []
 
     owner, repo = parts[0], parts[1]
     api_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/main?recursive=1"
     
-    print(f"[INFO] '{owner}/{repo}' reposu taranıyor...")
+    print(f"[INFO] Scanning '{owner}/{repo}'...")
     
     headers = {"User-Agent": "Codetrace-App"}
     
@@ -31,7 +31,7 @@ def fetch_repo_files(repo_url: str):
         response = requests.get(api_url, headers=headers)
 
     if response.status_code != 200:
-        print(f"[ERROR] Hata: Repo çekilemedi (Status Code: {response.status_code})")
+        print(f"[ERROR] Could not fetch repository (status {response.status_code})")
         return []
 
     data = response.json()
@@ -46,7 +46,7 @@ def fetch_repo_files(repo_url: str):
 
 
 def fetch_repo_metadata(owner: str, repo: str) -> dict:
-    """GitHub'dan repo meta verisini (yıldız sayısı vb.) çeker."""
+    """Fetch repository metadata such as the star count."""
     headers = {"User-Agent": "Codetrace-App"}
     github_token = os.getenv("GITHUB_TOKEN")
     if github_token:
@@ -61,4 +61,4 @@ def fetch_repo_metadata(owner: str, repo: str) -> dict:
 if __name__ == "__main__":
     test_repo = "https://github.com/psf/requests"
     files = fetch_repo_files(test_repo)
-    print(f"[SUCCESS] Toplam {len(files)} dosya bulundu.")
+    print(f"[SUCCESS] Found {len(files)} files.")

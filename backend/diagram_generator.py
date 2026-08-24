@@ -6,7 +6,7 @@ from indexer import get_all_chunks, get_file_content, DB_PATH
 
 
 def categorize_file(file_path: str) -> str:
-    """Dosyayı isim kalıbına göre mantıksal bir katmana ayırır."""
+    """Assign a file to an architecture layer based on its name."""
     name = file_path.split("/")[-1].lower()
     if name in ("api.py", "__init__.py", "main.py", "applications.py", "routing.py"):
         return "Entry & API Layer"
@@ -18,10 +18,10 @@ def categorize_file(file_path: str) -> str:
         return "Core Logic & Services"
 
 
-# Her katman için tutarlı bir renk paleti (arayüzün vurgu renkleriyle eşleşir).
-# Dolgular 8 basamaklı hex ile yarı saydam: kutular arayüzün koyu zemininin
-# üzerinde yüzüyormuş gibi durur, blok halinde renk lekesi oluşturmaz.
-# (rgba() KULLANMAYIN -- içindeki virgüller Mermaid'in classDef ayrıştırıcısını bozar.)
+# One palette per layer, matching the interface accent colours. Fills are
+# translucent via 8-digit hex so the boxes float over the dark background
+# instead of sitting on it as blocks of solid colour.
+# (Do NOT use rgba() -- its commas break the Mermaid classDef parser.)
 LAYER_STYLES = {
     "Entry & API Layer":     {"class": "entryLayer", "fill": "#38bdf826", "stroke": "#38bdf8", "text": "#bae6fd"},
     "Core Logic & Services": {"class": "coreLayer",  "fill": "#818cf826", "stroke": "#818cf8", "text": "#c7d2fe"},
@@ -33,11 +33,11 @@ LAYER_ORDER = ["Entry & API Layer", "Core Logic & Services", "Data Layer", "Util
 
 def extract_local_imports(raw_content: str, local_module_names: Set[str]) -> Set[str]:
     """
-    Bir dosyanın GERÇEK 'import' ifadelerini AST ile ayrıştırıp, depodaki
-    diğer dosyalara (aynı paket içi modüllere) yapılan gerçek importları
-    döner. Kaba regex/isim-eşleşmesi yerine gerçek Python import semantiğini
-    kullanır -- örn. her sınıftaki `__init__` metodunu sahte bir bağlantı
-    olarak saymaz.
+    Parse a file's real `import` statements with `ast` and return the ones
+    pointing at other modules in the same repository.
+
+    Uses actual import semantics rather than regex name-matching, which used to
+    count every class's `__init__` method as a link to `__init__.py`.
     """
     referenced = set()
     try:
@@ -65,12 +65,12 @@ def extract_local_imports(raw_content: str, local_module_names: Set[str]) -> Set
 
 def get_architecture_graph(db_path: str = DB_PATH) -> Dict[str, Any]:
     """
-    Diyagramın ham verisini döner: katmanlar, içlerindeki dosyalar ve dosyalar
-    arasındaki GERÇEK import ilişkileri.
+    Return the diagram's raw data: layers, the files inside them, and the real
+    import relationships between those files.
 
-    İstemci bu veriden diyagramı kendisi çiziyor; böylece bir katman açılıp
-    kapandığında sunucuya gitmeden anında yeniden çizilebiliyor ve kapalı
-    katmanlar tek bir kutuya toplanarak ok kalabalığı ortadan kalkıyor.
+    The client draws the diagram from this, so expanding or collapsing a layer
+    redraws instantly without a server round trip, and collapsed layers can be
+    merged into a single box to keep the arrows readable.
     """
     chunks = get_all_chunks(db_path)
     if not chunks:
@@ -112,25 +112,24 @@ def get_architecture_graph(db_path: str = DB_PATH) -> Dict[str, Any]:
 
 def generate_architecture_diagram(db_path: str = DB_PATH, max_edges_per_node: int = 4) -> Dict[str, Any]:
     """
-    Veritabanındaki GERÇEK dosya içeriklerinden, dosyalar arası GERÇEK
-    'import' ilişkilerini (AST ile) tespit ederek katmanlara ayrılmış
-    bir Mermaid.js şeması üretir. Analiz edilen repoya göre her seferinde
-    farklı, doğru bir sonuç döner -- şablon/sabit çıktı YOKTUR.
+    Build a layered Mermaid.js diagram from the real import relationships
+    found in the indexed files. The output reflects whichever repository was
+    analyzed -- there is no template or canned result.
     """
     chunks = get_all_chunks(db_path)
 
     if not chunks:
         return {
             "status": "error",
-            "message": "Diyagram üretilecek veritabanı kaydı bulunamadı.",
+            "message": "Nothing indexed to build a diagram from.",
             "mermaid_code": ""
         }
 
     files = list(set([c["file_path"] for c in chunks]))
     file_ids = {f: f"Node_{idx}" for idx, f in enumerate(files)}
 
-    # dosya taban adı (uzantısız) -> tam dosya yolu eşlemesi (aynı isim
-    # birden fazla dosyada varsa son görülen kazanır, kabul edilebilir bir sınırlama)
+    # module name (no extension) -> full path. If two files share a basename
+    # the last one wins, which is an acceptable limitation here.
     module_to_file = {f.split("/")[-1].replace(".py", ""): f for f in files}
     local_module_names = set(module_to_file.keys()) - {"__init__"}
 
@@ -205,9 +204,7 @@ def generate_architecture_diagram(db_path: str = DB_PATH, max_edges_per_node: in
 
 def get_diagram_node_details(db_path: str = DB_PATH, max_children_per_node: int = 8) -> dict:
     """
-    İndekslenmiş GERÇEK kod chunk'larını, mimari katmanlarına göre gruplayıp
-    'Interactive Nodes' panelinde gösterilecek gerçek veriyi üretir.
-    Analiz edilen repoya göre her seferinde farklı sonuç döner.
+    Group the indexed chunks by architecture layer for the layer list panel.
     """
     chunks = get_all_chunks(db_path)
     if not chunks:

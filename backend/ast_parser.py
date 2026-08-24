@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 
 
 def _extract_methods(class_node: ast.ClassDef, lines: List[str], file_path: str) -> List[Dict[str, Any]]:
-    """Bir sınıfın içindeki metodları ayrı, nitelikli isimlerle (ClassName.method_name) chunk'lar."""
+    """Chunk a class's methods separately, qualified as ClassName.method_name."""
     method_chunks = []
     for node in class_node.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -24,16 +24,16 @@ def _extract_methods(class_node: ast.ClassDef, lines: List[str], file_path: str)
 
 def parse_python_code(code_content: str, file_path: str) -> List[Dict[str, Any]]:
     """
-    Python kodunu AST ile tarar. Sadece üst seviye (top-level) fonksiyon ve
-    sınıfları ayırır; sınıf metodlarını da ayrıca "ClassName.method_name"
-    formatında ayrı chunk'lar olarak ekler (tekrarsız, nitelikli isimlerle).
+    Parse Python source with `ast`. Only top-level functions and classes are
+    split out, plus each class method as its own chunk named
+    "ClassName.method_name" -- qualified, so names stay unambiguous.
     """
     chunks = []
 
     try:
         tree = ast.parse(code_content)
     except SyntaxError:
-        print(f"⚠️ {file_path} dosyasında SyntaxError oluştu, ham metin olarak alınıyor.")
+        print(f"[WARNING] SyntaxError in {file_path}; storing it as raw text.")
         return [{
             "file_path": file_path,
             "name": "raw_file",
@@ -45,7 +45,7 @@ def parse_python_code(code_content: str, file_path: str) -> List[Dict[str, Any]]
 
     lines = code_content.splitlines()
 
-    # Sadece dosyanın en dış seviyesini geziyoruz (ast.walk değil!)
+    # Walk only the module top level -- deliberately not ast.walk().
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             chunk_type = "class" if isinstance(node, ast.ClassDef) else "function"
@@ -62,7 +62,7 @@ def parse_python_code(code_content: str, file_path: str) -> List[Dict[str, Any]]
                 "code_content": snippet
             })
 
-            # Sınıfsa, metodlarını da ayrıca aranabilir chunk yapıyoruz
+            # For a class, index its methods as separately searchable chunks.
             if isinstance(node, ast.ClassDef):
                 chunks.extend(_extract_methods(node, lines, file_path))
 
@@ -72,7 +72,7 @@ def parse_python_code(code_content: str, file_path: str) -> List[Dict[str, Any]]
 if __name__ == "__main__":
     sample_code = """
 def calculate_sum(a, b):
-    # İki sayıyı toplar
+    # Adds two numbers
     return a + b
 
 class User:
@@ -83,7 +83,7 @@ class User:
         return self.name
 """
     result = parse_python_code(sample_code, "sample.py")
-    print(f"✅ {len(result)} adet kod parçası (chunk) ayrıştırıldı:\n")
+    print(f"[SUCCESS] Parsed {len(result)} chunks:\n")
     for item in result:
-        print(f"📌 [{item['type'].upper()}] {item['name']} (Satır {item['start_line']}-{item['end_line']}):")
+        print(f"[{item['type'].upper()}] {item['name']} (lines {item['start_line']}-{item['end_line']}):")
         print(f"{item['code_content']}\n" + "-" * 40)
