@@ -1,14 +1,16 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, EmailStr
+from typing import Dict, Any
 import sqlite3
 from pipeline import index_github_repository
 from rag_engine import ask_codetrace, ask_codetrace_stream, DEFAULT_MODEL
 from diagram_generator import generate_architecture_diagram, get_diagram_node_details, get_architecture_graph
 from readme_generator import generate_repo_readme
 from indexer import DB_PATH, get_file_content as get_indexed_file_content
-from auth import register_user, login_user
+from auth import register_user, login_user, get_user_by_token, revoke_session
 from foundry_utils import ensure_model_loaded
 
 app = FastAPI(
@@ -21,8 +23,8 @@ app = FastAPI(
 @app.on_event("startup")
 def load_foundry_model_on_startup():
     """
-    Backend ayağa kalkarken Foundry Local'daki varsayılan modelin belleğe
-    yüklü olduğundan emin olur. Model zaten yüklüyse hiçbir şey yapmaz.
+    Make sure the default Foundry Local model is loaded before serving traffic.
+    Does nothing if it is already in memory.
     """
     ensure_model_loaded(DEFAULT_MODEL)
 
@@ -35,6 +37,25 @@ app.add_middleware(
 )
 
 
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def require_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)
+) -> Dict[str, Any]:
+    """
+    Session check for protected endpoints.
+
+    The client's own "signed in" flag is never trusted: the token is matched
+    against the stored session on every request.
+    """
+    token = credentials.credentials if credentials else None
+    user = get_user_by_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="A valid session is required. Please sign in.")
+    return user
+
+
 class AnalyzeRequest(BaseModel):
     repo_url: str
 
@@ -44,13 +65,13 @@ class AskRequest(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    email: str
+    email: EmailStr
     password: str
     name: str = ""
 
 
 class LoginRequest(BaseModel):
-    email: str
+    email: EmailStr
     password: str
 
 
@@ -60,14 +81,14 @@ def read_root():
 
 
 @app.post("/api/analyze")
-def analyze_repository(request: AnalyzeRequest):
+def analyze_repository(request: AnalyzeRequest, user: Dict[str, Any] = Depends(require_user)):
     if not request.repo_url:
-        raise HTTPException(status_code=400, detail="repo_url parametresi zorunludur.")
+        raise HTTPException(status_code=400, detail="repo_url is required.")
     try:
         result = index_github_repository(request.repo_url)
         return {
             "status": "success",
-            "message": f"'{request.repo_url}' reposu başarıyla indekslendi.",
+            "message": f"Indexed '{request.repo_url}' successfully.",
             "repo_url": request.repo_url,
             "stars": result.get("stars", 0),
             "total_chunks": result.get("total_chunks", 0),
@@ -77,13 +98,16 @@ def analyze_repository(request: AnalyzeRequest):
             "node_details": get_diagram_node_details()
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"İndeksleme hatası: {str(e)}")
+        # Details go to the log, not the browser: file paths and stack frames
+        # should not leak to the client.
+        print(f"[ERROR] Indexing failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not index the repository. Check the server logs.")
 
 
 @app.post("/api/ask")
-def ask_question(request: AskRequest):
+def ask_question(request: AskRequest, user: Dict[str, Any] = Depends(require_user)):
     if not request.query:
-        raise HTTPException(status_code=400, detail="query parametresi zorunludur.")
+        raise HTTPException(status_code=400, detail="query is required.")
     try:
         result = ask_codetrace(request.query)
         return {
@@ -94,17 +118,18 @@ def ask_question(request: AskRequest):
             "sources": result["sources"]
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sorgulama hatası: {str(e)}")
+        print(f"[ERROR] Query failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not answer the query. Check the server logs.")
 
 
 @app.post("/api/ask-stream")
-def ask_question_stream(request: AskRequest):
+def ask_question_stream(request: AskRequest, user: Dict[str, Any] = Depends(require_user)):
     """
-    /api/ask ile aynı yanıtı üretir, ama modelin ürettiği kelimeleri anında
-    aktarır. İstemci ilk kelimeleri saniyeler içinde görür.
+    Same answer as /api/ask, but streamed token by token so the client sees
+    the first words within seconds.
     """
     if not request.query:
-        raise HTTPException(status_code=400, detail="query parametresi zorunludur.")
+        raise HTTPException(status_code=400, detail="query is required.")
     return StreamingResponse(
         ask_codetrace_stream(request.query),
         media_type="application/x-ndjson",
@@ -113,30 +138,35 @@ def ask_question_stream(request: AskRequest):
 
 
 @app.get("/api/diagram")
-def get_architecture_diagram():
+def get_architecture_diagram(user: Dict[str, Any] = Depends(require_user)):
     try:
         return generate_architecture_diagram()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Diyagram üretme hatası: {str(e)}")
+        print(f"[ERROR] Diagram generation failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not generate the diagram. Check the server logs.")
 
 
 @app.post("/api/generate-readme")
-def generate_readme():
+def generate_readme(user: Dict[str, Any] = Depends(require_user)):
     try:
         result = generate_repo_readme()
-        if result.get("status") == "success":
-            return result
-        raise HTTPException(status_code=500, detail=result.get("message", "README üretilemedi"))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"README üretim hatası: {str(e)}")
+        print(f"[ERROR] README generation failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not generate the README. Check the server logs.")
+
+    if result.get("status") != "success":
+        # Nothing indexed yet is a client mistake, not a server failure.
+        raise HTTPException(status_code=400, detail=result.get("message", "Could not generate the README"))
+    return result
 
 
 @app.post("/api/register")
 def register(request: RegisterRequest):
-    if not request.email or not request.password:
-        raise HTTPException(status_code=400, detail="E-posta ve şifre zorunludur.")
-    name = request.name.strip() or request.email.split("@")[0]
-    result = register_user(request.email.strip().lower(), request.password, name)
+    if not request.password:
+        raise HTTPException(status_code=400, detail="Email and password are required.")
+    email = request.email.strip().lower()
+    name = request.name.strip() or email.split("@")[0]
+    result = register_user(email, request.password, name)
     if result["status"] == "error":
         raise HTTPException(status_code=400, detail=result["message"])
     return result
@@ -144,20 +174,36 @@ def register(request: RegisterRequest):
 
 @app.post("/api/login")
 def login(request: LoginRequest):
-    if not request.email or not request.password:
-        raise HTTPException(status_code=400, detail="E-posta ve şifre zorunludur.")
+    if not request.password:
+        raise HTTPException(status_code=400, detail="Email and password are required.")
     result = login_user(request.email.strip().lower(), request.password)
     if result["status"] == "error":
         raise HTTPException(status_code=401, detail=result["message"])
     return result
 
 
-@app.get("/api/file-content")
-def get_file_content(path: str):
+@app.get("/api/me")
+def read_current_user(user: Dict[str, Any] = Depends(require_user)):
     """
-    Öncelikle GitHub'dan indekslenirken kaydedilen TAM ham dosya içeriğini döner.
-    Ham içerik yoksa, veritabanındaki AST chunk'larından birleştirerek döner.
-    Hiçbiri yoksa dürüstçe 'bulunamadı' der -- ASLA sahte/uydurma kod üretmez.
+    Confirm the client's stored token is still valid, so a reloaded page
+    cannot show a signed-in shell without a real session behind it.
+    """
+    return {"status": "success", "user": user}
+
+
+@app.post("/api/logout")
+def logout(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
+    if credentials:
+        revoke_session(credentials.credentials)
+    return {"status": "success"}
+
+
+@app.get("/api/file-content")
+def get_file_content(path: str, user: Dict[str, Any] = Depends(require_user)):
+    """
+    Prefer the complete raw file captured during indexing. If that is missing,
+    reassemble what is available from the AST chunks. If neither exists, say so
+    plainly -- never fabricate code.
     """
     try:
         raw_content = get_indexed_file_content(path)
@@ -182,7 +228,8 @@ def get_file_content(path: str):
         return {
             "status": "not_found",
             "file_path": path,
-            "content": f"# '{path}' için indekslenmiş bir kayıt bulunamadı."
+            "content": f"# No indexed record found for '{path}'."
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Dosya içeriği alınamadı: {str(e)}")
+        print(f"[ERROR] Could not read file content: {e}")
+        raise HTTPException(status_code=500, detail="Could not read the file content. Check the server logs.")
