@@ -22,11 +22,15 @@ Unlike generic chat assistants, Codetrace never relies on the model's memorized 
 
 - **🔍 TF-IDF Retrieval with Confidence Scoring** — Every answer is paired with a transparent similarity score, so you know exactly how much to trust it — not just a plausible-sounding answer.
 
-- **🛡️ Two-Layer Hallucination Guard** — A strict system prompt plus code-level post-processing ensures the model never falls back on its own pretrained knowledge of popular libraries (e.g. inventing `pip install` commands that aren't actually documented in the indexed code).
+- **🛡️ Three-Layer Hallucination Guard** — Before the model is called at all, a question is checked against the indexed vocabulary: terms that never appear in the code count against it, so asking a `requests` index about "GraphQL subscriptions" is refused outright rather than answered from the model's own memory. Retrieval similarity is the second gate, and a strict system prompt is the third.
 
 - **🎓 Junior-Friendly Mentor Mode** — Answers don't just state facts — they explain *why* the code is structured that way and call out recognizable design patterns, aimed at helping junior developers actually learn from the codebase.
 
-- **🎨 Auto-Generated Architecture Diagrams** — A Mermaid.js dependency graph is built automatically from regex-based cross-file reference detection, visualizing how modules actually depend on each other.
+- **🎨 Auto-Generated Architecture Diagrams** — A Mermaid.js dependency graph built from the repository's real `import` statements, parsed with `ast`. Files are grouped into architecture layers that start collapsed and expand on click, and each box shows only its heaviest dependency — so the diagram stays readable instead of turning into a web of arrows.
+
+- **⌨️ Streaming Answers** — Responses arrive token by token as the local model generates them, so the first words appear in seconds instead of after a minute of blank screen.
+
+- **🔑 Session-Based Accounts** — Register and sign in with a password (PBKDF2-SHA256, per-user salt). Every analysis and query endpoint requires a valid session token, which is verified server-side on each request.
 
 - **📝 AI-Generated README Drafts** — Generates a concise, fact-grounded README summary of any indexed repository, with the same hallucination guard applied.
 
@@ -37,35 +41,46 @@ Unlike generic chat assistants, Codetrace never relies on the model's memorized 
 ## Architecture
 
 ```
-GitHub Repo URL
-      │
-      ▼
-┌─────────────────┐     ┌──────────────────┐     ┌───────────────────┐
-│  GitHub Fetcher  │────▶│   AST Parser      │────▶│  SQLite Indexer   │
-│  (REST API)      │     │  (function/class/  │     │  (chunk storage)  │
-└─────────────────┘     │   method chunking) │     └───────────────────┘
-                         └──────────────────┘               │
-                                                            ▼
-                                                    ┌───────────────────┐
-                                                    │  TF-IDF Search     │
-                                                    │  Engine             │
-                                                    │  (cosine similarity)│
-                                                    └───────────────────┘
-                                                            │
-                                                            ▼
-┌─────────────────┐     ┌──────────────────┐     ┌───────────────────┐
-│  Mermaid.js       │◀────│  FastAPI REST     │────▶│  Foundry Local      │
-│  Diagram Generator│     │  API (/analyze,    │     │  RAG Engine          │
-└─────────────────┘     │   /ask, /generate-  │     │  (grounded Q&A)      │
-                         │   readme)           │     └───────────────────┘
-                         └──────────────────┘
-                                   │
-                                   ▼
-                         ┌──────────────────┐
-                         │  React + Tailwind │
-                         │  Dark UI (IDE-     │
-                         │  inspired)          │
-                         └──────────────────┘
+                          GitHub Repo URL
+                                │
+    ┌───────────────────────────┼───────────────────────────┐
+    ▼                           ▼                           ▼
+┌────────────┐          ┌──────────────┐          ┌──────────────────┐
+│  Fetcher   │─ files ─▶│  AST Parser  │─chunks─▶ │  SQLite Indexer  │
+│ (REST API, │          │  (functions, │          │  chunks + raw    │
+│  parallel) │          │   classes,   │          │  file contents   │
+└────────────┘          │   methods,   │          │  + users/sessions│
+                        │   imports)   │          └──────────────────┘
+                        └──────────────┘                   │
+                                                 ┌─────────┴─────────┐
+                                                 ▼                   ▼
+                                        ┌─────────────────┐  ┌──────────────┐
+                                        │  TF-IDF Search  │  │   Diagram    │
+                                        │  + vocabulary   │  │  Generator   │
+                                        │    coverage     │  │ (import graph)│
+                                        └─────────────────┘  └──────────────┘
+                                                 │                   │
+                                                 ▼                   │
+                                        ┌─────────────────┐          │
+                                        │  Foundry Local  │          │
+                                        │  (grounded Q&A, │          │
+                                        │   streamed)     │          │
+                                        └─────────────────┘          │
+                                                 │                   │
+                          ┌──────────────────────┴───────────────────┘
+                          ▼
+                 ┌──────────────────────┐
+                 │  FastAPI REST API    │
+                 │  /analyze  /ask-stream│
+                 │  /generate-readme     │
+                 │  /login /register /me │
+                 └──────────────────────┘
+                          │
+                          ▼
+                 ┌──────────────────────┐
+                 │  React + Tailwind    │
+                 │  Dark IDE-style UI   │
+                 └──────────────────────┘
 ```
 
 ---
@@ -79,7 +94,8 @@ GitHub Repo URL
 | Code Parsing | Python `ast` module |
 | Retrieval | scikit-learn (TF-IDF + cosine similarity) |
 | Storage | SQLite |
-| Diagram Generation | Mermaid.js (regex-based dependency extraction) |
+| Diagram Generation | Mermaid.js (AST-based `import` extraction) |
+| Auth | Session tokens in SQLite, PBKDF2-SHA256 password hashing |
 | Frontend | React (Vite) + Tailwind CSS + lucide-react |
 
 ---
@@ -87,7 +103,7 @@ GitHub Repo URL
 ## Getting Started
 
 ### Prerequisites
-- [Microsoft Foundry Local](https://learn.microsoft.com/en-us/azure/ai-foundry/foundry-local/) installed and running
+- [Microsoft Foundry Local](https://learn.microsoft.com/en-us/azure/ai-foundry/foundry-local/) installed (the backend starts it for you)
 - Python 3.10+
 - Node.js 18+
 
@@ -99,11 +115,13 @@ python -m venv venv
 venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 
-foundry service start
-foundry model load qwen2.5-coder-1.5b
-
 uvicorn main:app --reload
 ```
+
+On startup the backend checks Foundry Local, starts the daemon if it is not
+running, and loads `qwen2.5-coder-1.5b` into memory — no manual setup needed.
+The daemon picks a different port on each restart, so its address is resolved
+from `foundry status` at call time rather than hardcoded.
 
 ### Frontend
 
@@ -113,7 +131,12 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`, paste a public GitHub repo URL (e.g. `https://github.com/psf/requests`), and click **Analyze Repository**.
+Open `http://localhost:5173`, create an account, paste a public GitHub repo URL
+(e.g. `https://github.com/psf/requests`), and click **Analyze**.
+
+Indexing takes a few seconds. The AI-written README is generated in the
+background afterwards and takes a couple of minutes on a local model — the
+diagram and file explorer are usable immediately.
 
 ---
 
@@ -122,8 +145,10 @@ Open `http://localhost:5173`, paste a public GitHub repo URL (e.g. `https://gith
 A few deliberate engineering calls worth noting:
 
 - **TF-IDF over embeddings:** Chosen for speed and zero extra dependencies at this scale (hundreds of chunks). For much larger codebases, a proper embedding-based vector store would be the natural next step.
-- **`qwen2.5-coder-1.5b` over the 7B variant:** The development machine's limited RAM made the 7B model unreliable for consistent local inference. The 1.5B model was benchmarked and found to produce accurate, grounded answers at a fraction of the latency — a conscious latency/quality trade-off appropriate for a real-time chat interface.
+- **`qwen2.5-coder-1.5b` over the 7B variant:** The development machine's limited RAM made the 7B model unreliable for consistent local inference. The 1.5B model still produces accurate, grounded answers at a fraction of the latency — a hardware constraint that turned out to be an acceptable latency/quality trade-off for a real-time chat interface.
 - **Single-repo indexing:** The current scope re-indexes on each new analysis rather than maintaining multiple repos simultaneously — a deliberate MVP boundary, not a limitation of the underlying architecture.
+- **Vocabulary coverage as a guardrail:** TF-IDF silently discards query terms it has never seen, which meant an off-topic question could score *higher* than a real one by matching on whatever generic words survived. Scoring a question by how much of its distinctive vocabulary actually exists in the index closes that gap without a second model.
+- **README off the critical path:** Generating it inline made indexing take ~175s, nearly all of it spent writing a document the user had not opened yet. It now runs in the background after the diagram is already on screen.
 
 ---
 
