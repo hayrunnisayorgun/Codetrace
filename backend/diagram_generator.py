@@ -217,14 +217,20 @@ def get_diagram_node_details(db_path: str = DB_PATH, max_children_per_node: int 
             "name": c["name"],
             "type": c["type"],
             "lines": f"{c['start_line']}-{c['end_line']}",
-            "file": c["file_path"]
+            "file": c["file_path"],
+            "size": c["end_line"] - c["start_line"]
         })
 
     result = {}
     for layer_name, items in layers.items():
+        # Rank by how many lines a component spans before truncating. Taking the
+        # first few in database order surfaced whatever happened to be parsed
+        # first -- typically small helpers -- and buried the classes that
+        # actually define the architecture.
+        ranked = sorted(items, key=lambda item: item["size"], reverse=True)
         result[layer_name] = {
             "label": layer_name,
-            "children": items[:max_children_per_node]
+            "children": ranked[:max_children_per_node]
         }
     return result
 
