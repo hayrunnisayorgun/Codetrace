@@ -15,6 +15,7 @@ import {
 import { API_BASE, GUEST_USER } from './config';
 import mermaid, { buildMermaidFromGraph } from './lib/mermaid';
 import { languageFromFilePath } from './lib/language';
+import { suggestedQuestions } from './lib/suggestions';
 import { MarkdownWithCode } from './components/CodeBlock';
 
 
@@ -107,6 +108,8 @@ function App() {
   const [showProfileModal, setShowProfileModal] = useState(false);
 
   const chatEndRef = useRef(null);
+
+  const suggestions = suggestedQuestions(analyzeResult?.node_details);
 
   const signOutLocally = useCallback(() => {
     setAuthToken('');
@@ -403,11 +406,13 @@ function App() {
     setShowProfileModal(false);
   };
 
-  const handleAsk = async (e) => {
+  // `presetQuestion` lets a suggestion chip ask directly, without routing the
+  // text through the input box first.
+  const handleAsk = async (e, presetQuestion) => {
     if (e) e.preventDefault();
-    if (!query.trim()) return;
+    const currentQuery = (presetQuestion ?? query).trim();
+    if (!currentQuery || isAsking) return;
 
-    const currentQuery = query;
     setChatHistory((prev) => [...prev, { sender: 'user', text: currentQuery }]);
     setQuery('');
     setIsAsking(true);
@@ -772,6 +777,25 @@ function App() {
                 </p>
               )}
             </div>
+
+            {/* Starter questions, drawn from real indexed components. Shown only
+                before the first question so they never crowd the conversation. */}
+            {analyzeResult && chatHistory.length === 0 && suggestions.length > 0 && (
+              <div className="space-y-2">
+                <span className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider">Try asking</span>
+                <div className="flex flex-col gap-1.5">
+                  {suggestions.map((question) => (
+                    <button
+                      key={question}
+                      onClick={() => handleAsk(null, question)}
+                      className="text-left text-xs font-semibold text-sky-300 bg-[#161c2e] hover:bg-[#1c2438] border border-[#1c2438] hover:border-sky-500/40 rounded-lg px-3 py-2 transition-all"
+                    >
+                      {question}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {chatHistory.map((msg, idx) => (
               <div key={idx} className={`flex flex-col animate-in fade-in slide-in-from-bottom-2 duration-300 ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}>
